@@ -1,0 +1,26 @@
+{
+  "user_id": "dea7adb7-5588-4552-90bd-042576c18fd9",
+  "locale": "en",
+  "schema_version": "1.0",
+  "created_at": "2026-08-31T12:23:29.095751+00:00",
+  "layer1": {
+    "liked_books": [],
+    "selected_genres": [
+      "Mystery"
+    ],
+    "selected_moods": []
+  },
+  "layer2": {
+    "plot_vs_character": 76,
+    "pace": null,
+    "complexity": null,
+    "length_preference": "medium",
+    "tone": null,
+    "avoid_list": [
+      "child_harm"
+    ]
+  },
+  "layer3": {
+    "free_text": "deep characteristic"
+  }
+}
