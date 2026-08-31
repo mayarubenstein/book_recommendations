@@ -1,0 +1,2 @@
+streamlit>=1.40
+geonamescache>=2.0

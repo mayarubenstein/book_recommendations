@@ -1,0 +1,30 @@
+[theme]
+base = "light"
+
+# Accent stays the existing deep teal-green - kept as is, everything else
+# tuned around it. #2E6F6E on white text is ~5.8:1 contrast (WCAG AA safe).
+primaryColor = "#2E6F6E"
+
+# Off-white/off-black instead of pure #FFFFFF/#000000 - a hair of cool-green
+# undertone ties the neutrals to the accent instead of a stark generic gray.
+backgroundColor = "#FAFBF9"
+secondaryBackgroundColor = "#EEF3F0"
+textColor = "#1B211E"
+borderColor = "#D7E1DC"
+linkColor = "#2E6F6E"
+
+showWidgetBorder = true
+showSidebarBorder = true
+
+# Body stays a clean, legible sans (this is a functional wizard, not an
+# editorial page - readability wins). Headings get a literary serif, since
+# "book recommendation product" is a genuine, articulable reason to reach for
+# one (Lora chosen for legibility at UI heading sizes over more decorative
+# alternatives like Playfair Display).
+font = "Outfit:https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=swap"
+headingFont = "Lora:https://fonts.googleapis.com/css2?family=Lora:wght@500;600;700&display=swap"
+
+# One shape language throughout: buttons are full pill (matching the mood/
+# genre/book chips already in the wizard), everything else softly rounded.
+baseRadius = "medium"
+buttonRadius = "full"
