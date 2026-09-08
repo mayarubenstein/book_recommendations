@@ -6,7 +6,7 @@ from src.data.profile_store import ProfileStore
 from src.i18n.strings import t, translate_genre
 from src.profile.schema import UserPreferenceProfile
 from src.ui.html_utils import render_html
-from src.ui.state import reset_wizard
+from src.ui.state import MAX_NUM_RECOMMENDATIONS, MIN_NUM_RECOMMENDATIONS, reset_wizard
 
 _TEAL = "#2E6F6E"
 _CHIP_BG = "#EEF3F0"
@@ -43,6 +43,17 @@ def _chip_row(labels: list[str]) -> None:
 
 def render(profile_store: ProfileStore) -> None:
     raw = st.session_state.profile
+
+    render_html(f"""<h2 style="font-family:'Lora',serif; color:{_TEAL}; margin-bottom:0.75rem;">{t("summary.title")}</h2>""")
+
+    num_recommendations = st.slider(
+        t("summary.num_recommendations.label"),
+        min_value=MIN_NUM_RECOMMENDATIONS,
+        max_value=MAX_NUM_RECOMMENDATIONS,
+        value=st.session_state.num_recommendations,
+    )
+    st.session_state.num_recommendations = num_recommendations
+
     profile = UserPreferenceProfile(
         user_id=st.session_state.user_id,
         locale=st.session_state.locale,
@@ -50,10 +61,9 @@ def render(profile_store: ProfileStore) -> None:
         layer2=raw.get("layer2"),
         layer3=raw.get("layer3"),
         personal_info=raw.get("personal_info"),
+        num_recommendations=num_recommendations,
     )
     profile_store.save_profile(profile)
-
-    render_html(f"""<h2 style="font-family:'Lora',serif; color:{_TEAL}; margin-bottom:0.75rem;">{t("summary.title")}</h2>""")
 
     layer1 = profile.layer1
     has_books = bool(layer1 and layer1.liked_books)
@@ -80,7 +90,7 @@ def render(profile_store: ProfileStore) -> None:
         ]
         if l2.length_preference:
             lines.append(f"- {t('summary.length_prefix')} {t(f'layer2.length.{l2.length_preference}')}")
-        avoid_parts = [t(f"layer2.avoid.{a}") for a in l2.avoid_list] + ([l2.avoid_other] if l2.avoid_other else [])
+        avoid_parts = [t(f"layer2.avoid.{a}") for a in l2.avoid_list]
         if avoid_parts:
             lines.append(f"- {t('summary.avoid_prefix')} {', '.join(avoid_parts)}")
         if lines:

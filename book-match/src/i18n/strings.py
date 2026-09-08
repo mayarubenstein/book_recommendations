@@ -64,8 +64,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "layer2.avoid.child_harm": "Child harm",
         "layer2.avoid.substance_abuse": "Substance abuse",
         "layer2.avoid.character_death": "On-page character death",
-        "layer2.avoid.other_label": "Anything else you'd like to avoid?",
-        "layer2.avoid.other_placeholder": "e.g. love triangles, unreliable narrators…",
 
         "layer3.title": "Anything else?",
         "layer3.prompt": "Anything else you want me to consider for the book you want to read?",
@@ -90,6 +88,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "mood.quiet_introspective": "Quiet / introspective",
 
         "summary.title": "Your preference profile",
+        "summary.num_recommendations.label": "How many book recommendations would you like?",
         "summary.section.books": "Books you loved",
         "summary.section.books_empty": "You didn't add any specific books — your genre and mood picks still guide the match.",
         "summary.section.vibe": "Genres & mood",

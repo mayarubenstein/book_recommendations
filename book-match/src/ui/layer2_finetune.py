@@ -81,13 +81,6 @@ def render() -> None:
     avoid_list = [label_to_avoid_key[label] for label in selected_avoid_labels]
     draft["l2_avoid"] = avoid_list
 
-    avoid_other = st.text_input(
-        t("layer2.avoid.other_label"),
-        value=draft["l2_avoid_other"],
-        placeholder=t("layer2.avoid.other_placeholder"),
-    )
-    draft["l2_avoid_other"] = avoid_other
-
     if st.button(t("nav.back"), type="primary", use_container_width=True):
         goto(STEP_LAYER1)
 
@@ -103,6 +96,5 @@ def render() -> None:
             length_preference=length_preference,
             tone=tone,
             avoid_list=avoid_list,
-            avoid_other=avoid_other.strip() or None,
         )
         goto(STEP_LAYER3)
