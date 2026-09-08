@@ -1,0 +1,104 @@
+[
+  {
+    "Title": "Example Amazon Book",
+    "Clean_Title": "example amazon book",
+    "Description": "A short example of a book record from the Amazon reviews dataset.",
+    "Authors": "['Example Author']",
+    "Category/Genre": "Fiction",
+    "ISBN/ID": null,
+    "Book ID": "AMZ_1234567890",
+    "Review_Count": 4,
+    "Reviews_List": [
+      {
+        "user_id": "A1000000000001",
+        "original_score": 5.0,
+        "normalized_score": 1.0,
+        "summary": "Excellent book",
+        "text": "I really enjoyed this book.",
+        "user_demographics": null
+      },
+      {
+        "user_id": "A1000000000002",
+        "original_score": 4.0,
+        "normalized_score": 0.75,
+        "summary": "Very good",
+        "text": "A very enjoyable read.",
+        "user_demographics": null
+      },
+      {
+        "user_id": "A1000000000003",
+        "original_score": 3.0,
+        "normalized_score": 0.5,
+        "summary": "An average read",
+        "text": "It was fine, but not my favorite.",
+        "user_demographics": null
+      },
+      {
+        "user_id": "A1000000000004",
+        "original_score": 2.0,
+        "normalized_score": 0.25,
+        "summary": "Not for me",
+        "text": "I did not enjoy this book very much.",
+        "user_demographics": null
+      }
+    ],
+    "Average_Normalized_Rating": 0.625
+  },
+  {
+    "Title": "Example BX Book",
+    "Clean_Title": "example bx book",
+    "Description": "A short example of a book record from the Book-Crossing dataset.",
+    "Authors": "['Example BX Author']",
+    "Category/Genre": "Biography & Autobiography",
+    "ISBN/ID": "1234567890",
+    "Book ID": "BX_1234567890",
+    "Review_Count": 4,
+    "Reviews_List": [
+      {
+        "user_id": "100001",
+        "original_score": 10,
+        "normalized_score": 1.0,
+        "summary": null,
+        "text": null,
+        "user_demographics": {
+          "age": 53.0,
+          "location": "kansas city, missouri, usa"
+        }
+      },
+      {
+        "user_id": "100002",
+        "original_score": 8,
+        "normalized_score": 0.7777777778,
+        "summary": null,
+        "text": null,
+        "user_demographics": {
+          "age": 36.0,
+          "location": "milpitas, california, usa"
+        }
+      },
+      {
+        "user_id": "100003",
+        "original_score": 6,
+        "normalized_score": 0.5555555556,
+        "summary": null,
+        "text": null,
+        "user_demographics": {
+          "age": null,
+          "location": "payson, arizona, usa"
+        }
+      },
+      {
+        "user_id": "100004",
+        "original_score": 9,
+        "normalized_score": 0.8888888889,
+        "summary": null,
+        "text": null,
+        "user_demographics": {
+          "age": 49.0,
+          "location": "indiana, pennsylvania, usa"
+        }
+      }
+    ],
+    "Average_Normalized_Rating": 0.8055555556
+  }
+]
