@@ -33,7 +33,9 @@ docstring there for how staleness is handled if the catalog changes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -42,19 +44,74 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+import ijson
 from pydantic import BaseModel, Field
 from sklearn.metrics.pairwise import cosine_similarity
+
+CATALOG_COLUMNS = [
+    "Title",
+    "Clean_Title",
+    "Description",
+    "Authors",
+    "Category/Genre",
+    "ISBN/ID",
+    "Book ID",
+    "Review_Count",
+    "Reviews_List",
+    "Average_Normalized_Rating",
+]
+EMBEDDING_TEXT_VERSION = "metadata-and-reviews-v2"
 
 # ---------------------------------------------------------------------------
 # 1. Loading the book catalog produced by creating_one_file.ipynb
 # ---------------------------------------------------------------------------
 
+def _iter_catalog_records(json_path: str | Path):
+    with open(json_path, "rb") as catalog_file:
+        yield from ijson.items(catalog_file, "item")
+
+
+def _reviews_to_text(reviews: Any, max_reviews: int = 8, max_chars: int = 2400) -> str:
+    """Keep a bounded, source-tolerant text sample from each book's reviews."""
+    if not isinstance(reviews, list):
+        return ""
+
+    parts: list[str] = []
+    for review in reviews[:max_reviews]:
+        if not isinstance(review, dict):
+            continue
+        summary = str(review.get("summary") or "").strip()
+        text = str(review.get("text") or "").strip()
+        if summary:
+            parts.append(f"review summary: {summary}")
+        if text:
+            parts.append(f"reader review: {text}")
+        if sum(len(part) for part in parts) >= max_chars:
+            break
+    return " ".join(parts)[:max_chars]
+
+
 def load_catalog(json_path: str | Path) -> pd.DataFrame:
     """Load all_books.json into a DataFrame and add a single text field per
     book that we'll embed. Missing text fields degrade gracefully."""
-    with open(json_path, "r", encoding="utf-8") as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
+    records = []
+    required_fields = set(CATALOG_COLUMNS) - {"Reviews_List"}
+    for record in _iter_catalog_records(json_path):
+        if not isinstance(record, dict):
+            raise ValueError(f"Catalog at {json_path} must contain book objects.")
+        row = {field: record.get(field) for field in required_fields}
+        row["_reviews_text"] = _reviews_to_text(record.get("Reviews_List"))
+        records.append(row)
+    if not records:
+        raise ValueError(f"Catalog at {json_path} must contain at least one book.")
+    df = pd.DataFrame.from_records(records)
+
+    missing = [
+        column for column in CATALOG_COLUMNS
+        if column != "Reviews_List" and column not in df.columns
+    ]
+    if missing:
+        raise ValueError(f"Catalog is missing required fields: {', '.join(missing)}")
 
     for col in ["Title", "Clean_Title", "Description", "Authors", "Category/Genre"]:
         if col not in df.columns:
@@ -83,6 +140,8 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         + (df["_genre_str"] + " ") * 3
         + (df["_authors_str"] + " ") * 2
         + df["_desc_str"]
+            + " reviews "
+            + df["_reviews_text"].fillna("").astype(str)
     ).str.lower()
 
     df["Review_Count"] = pd.to_numeric(df["Review_Count"], errors="coerce").fillna(0)
@@ -90,6 +149,15 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         df["Average_Normalized_Rating"], errors="coerce"
     )
     return df
+
+
+def catalog_fingerprint(json_path: str | Path) -> str:
+    """Return a stable fingerprint for the exact local catalog file."""
+    digest = hashlib.sha256()
+    with open(json_path, "rb") as catalog_file:
+        for chunk in iter(lambda: catalog_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -124,11 +192,18 @@ class Layer2(BaseModel):
     length_preference: str | None = None
     tone: float | None = None
     avoid_list: list[str] = Field(default_factory=list)
+    avoid_other: str | None = None
 
 
 class Layer3(BaseModel):
     """Free-form taste description in the user's own words."""
     free_text: str = ""
+
+
+class PersonalInfo(BaseModel):
+    age: int | None = None
+    country: str | None = None
+    city: str | None = None
 
 
 def _describe_slider(value: float | None, low: str, mid: str, high: str) -> str | None:
@@ -160,6 +235,7 @@ class UserProfile(BaseModel):
     layer1: Layer1 = Field(default_factory=Layer1)
     layer2: Layer2 = Field(default_factory=Layer2)
     layer3: Layer3 = Field(default_factory=Layer3)
+    personal_info: PersonalInfo | None = None
 
     @classmethod
     def from_json(cls, path: str | Path) -> "UserProfile":
@@ -191,8 +267,17 @@ class UserProfile(BaseModel):
         parts.append(_describe_slider(l2.tone, "dark and serious", "a mix of light and dark", "light and hopeful"))
         if l2.length_preference:
             parts.append(f"{l2.length_preference}-length book")
+        if l2.avoid_other:
+            parts.append(f"avoid {l2.avoid_other}")
         if l3.free_text:
             parts.append(l3.free_text)
+        if self.personal_info:
+            if self.personal_info.age is not None:
+                parts.append(f"reader age {self.personal_info.age}")
+            if self.personal_info.country:
+                parts.append(f"reader country {self.personal_info.country}")
+            if self.personal_info.city:
+                parts.append(f"reader city {self.personal_info.city}")
         return " ".join(p for p in parts if p).lower()
 
 
@@ -238,7 +323,8 @@ class SentenceTransformerEmbedder(Embedder):
                  batch_size: int = 128):
         from sentence_transformers import SentenceTransformer  # deferred import
 
-        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name, token=os.getenv("HF_TOKEN"))
         self.max_chars = max_chars
         self.batch_size = batch_size
 
@@ -299,6 +385,69 @@ class Recommender:
 
         if cache_path is not None and isinstance(self._catalog_embeddings, np.ndarray):
             np.save(cache_path, self._catalog_embeddings)
+        return self
+
+    def save_embedding_artifact(
+        self,
+        artifact_path: str | Path,
+        catalog_path: str | Path,
+    ) -> None:
+        """Persist catalog vectors and the metadata needed to validate them."""
+        if not isinstance(self._catalog_embeddings, np.ndarray):
+            raise RuntimeError("Call fit() before saving an embedding artifact.")
+
+        book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy()
+        metadata = {
+            "catalog_fingerprint": catalog_fingerprint(catalog_path),
+            "embedding_model": getattr(self.embedder, "model_name", None),
+            "embedding_text_version": EMBEDDING_TEXT_VERSION,
+            "row_count": len(self.catalog),
+        }
+        Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            artifact_path,
+            embeddings=self._catalog_embeddings,
+            book_ids=book_ids,
+            metadata=json.dumps(metadata),
+        )
+
+    def load_embedding_artifact(
+        self,
+        artifact_path: str | Path,
+        catalog_path: str | Path,
+    ) -> "Recommender":
+        """Load vectors created by the offline indexing step after validation."""
+        artifact = Path(artifact_path)
+        if not artifact.exists():
+            raise FileNotFoundError(
+                f"Missing catalog embedding artifact: {artifact}. "
+                "Run `python build_catalog_embeddings.py` first."
+            )
+
+        with np.load(artifact, allow_pickle=False) as saved:
+            metadata = json.loads(str(saved["metadata"]))
+            embeddings = saved["embeddings"]
+            saved_book_ids = saved["book_ids"].astype(str)
+
+        expected_model = getattr(self.embedder, "model_name", None)
+        if metadata.get("catalog_fingerprint") != catalog_fingerprint(catalog_path):
+            raise ValueError(
+                "Catalog embedding artifact is stale because all_books.json changed. "
+                "Run `python build_catalog_embeddings.py` again."
+            )
+        if metadata.get("embedding_model") != expected_model:
+            raise ValueError(
+                f"Artifact model {metadata.get('embedding_model')!r} does not match "
+                f"the configured model {expected_model!r}. Rebuild the artifact."
+            )
+        if metadata.get("embedding_text_version") != EMBEDDING_TEXT_VERSION:
+            raise ValueError("Embedding text format changed. Rebuild the artifact.")
+
+        current_book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy()
+        if len(embeddings) != len(self.catalog) or not np.array_equal(saved_book_ids, current_book_ids):
+            raise ValueError("Catalog embedding artifact does not match the current catalog order.")
+
+        self._catalog_embeddings = embeddings
         return self
 
     def _bayesian_rating(self, min_reviews: int = 20) -> pd.Series:
