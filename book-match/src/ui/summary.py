@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+
+import requests
 import streamlit as st
 
 from src.data.profile_store import ProfileStore
@@ -12,6 +15,7 @@ _TEAL = "#2E6F6E"
 _CHIP_BG = "#EEF3F0"
 _BORDER = "#D7E1DC"
 _TEXT = "#1B211E"
+_API_URL = os.getenv("BOOK_RECOMMENDER_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 # (dataclass field name, low-end label key, high-end label key) - drives the
 # 0-100 slider values into a plain-language phrase instead of a raw number.
@@ -106,7 +110,33 @@ def render(profile_store: ProfileStore) -> None:
         st.markdown(f"**{t('summary.section.about_you')}**")
         st.markdown("\n".join(lines))
 
-    st.info(t("summary.not_available_yet"))
+    top_n = st.number_input(
+        "Number of recommendations",
+        min_value=1,
+        max_value=100,
+        value=10,
+        step=1,
+    )
+    if st.button("Get recommendations", type="primary", use_container_width=True):
+        try:
+            response = requests.post(
+                f"{_API_URL}/recommend",
+                params={"top_n": top_n},
+                json=profile.to_dict(),
+                timeout=120,
+            )
+            response.raise_for_status()
+            recommendations = response.json()
+            st.session_state.recommendations = recommendations
+        except requests.RequestException as exc:
+            st.error(f"Could not reach the recommendation API at {_API_URL}: {exc}")
+        except ValueError:
+            st.error("The recommendation API returned an invalid response.")
+
+    recommendations = st.session_state.get("recommendations", [])
+    if recommendations:
+        st.subheader("Recommendations")
+        st.dataframe(recommendations, use_container_width=True, hide_index=True)
 
     with st.expander(t("summary.raw_json")):
         st.json(profile.to_dict())
