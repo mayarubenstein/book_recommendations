@@ -1,0 +1,43 @@
+{
+  "user_id": "a1b2c3d4-5678-90ab-cdef-1234567890ab",
+  "locale": "en",
+  "schema_version": "1.1",
+  "created_at": "2026-08-31T10:56:50.353811+00:00",
+  "layer1": {
+    "liked_books": [
+      {
+        "book_id": "mock-002",
+        "title": "The Hobbit",
+        "authors": "J.R.R. Tolkien"
+      },
+      {
+        "book_id": "mock-016",
+        "title": "Circe",
+        "authors": "Madeline Miller"
+      }
+    ],
+    "selected_genres": [
+      "Fantasy",
+      "Historical Fiction"
+    ],
+    "selected_moods": [
+      "epic_sweeping",
+      "quiet_introspective"
+    ]
+  },
+  "layer2": {
+    "plot_vs_character": 65,
+    "pace": 40,
+    "complexity": 55,
+    "length_preference": "medium",
+    "tone": 70,
+    "avoid_list": [
+      "graphic_violence"
+    ]
+  },
+  "layer3": {
+    "free_text": "I love intricate magic systems and morally complex characters, but nothing with a tragic ending."
+  },
+  "personal_info": null,
+  "num_recommendations": 5
+}

@@ -10,6 +10,10 @@ STEP_LAYER3 = "layer3"
 STEP_LAYER4 = "layer4"
 STEP_SUMMARY = "summary"
 
+MIN_NUM_RECOMMENDATIONS = 1
+MAX_NUM_RECOMMENDATIONS = 10
+DEFAULT_NUM_RECOMMENDATIONS = 5
+
 # Streamlit drops a widget's own state once that widget isn't instantiated on
 # a script run (true for keyed and unkeyed widgets alike) - and since this
 # wizard only renders one screen's widgets per run, a screen's selections
@@ -32,7 +36,6 @@ _DEFAULT_DRAFT = {
     "l2_tone": 50,
     "l2_tone_no_pref": True,
     "l2_avoid": [],
-    "l2_avoid_other": "",
     "l3_free_text": "",
     "l4_age": None,
     "l4_country": None,
@@ -55,6 +58,8 @@ def init_state() -> None:
         st.session_state.profile = {"layer1": None, "layer2": None, "layer3": None, "personal_info": None}
     if "draft" not in st.session_state:
         st.session_state.draft = _fresh_draft()
+    if "num_recommendations" not in st.session_state:
+        st.session_state.num_recommendations = DEFAULT_NUM_RECOMMENDATIONS
 
 
 def goto(step: str) -> None:
@@ -66,4 +71,5 @@ def reset_wizard() -> None:
     """Clear all answers and go back to Layer 1, keeping the same user_id/locale."""
     st.session_state.profile = {"layer1": None, "layer2": None, "layer3": None, "personal_info": None}
     st.session_state.draft = _fresh_draft()
+    st.session_state.num_recommendations = DEFAULT_NUM_RECOMMENDATIONS
     goto(STEP_LAYER1)

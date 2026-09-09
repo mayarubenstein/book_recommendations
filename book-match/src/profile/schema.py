@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from src.data.book_provider import BookRef
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 
 @dataclass
@@ -24,7 +24,6 @@ class Layer2Profile:
     length_preference: str | None
     tone: int | None
     avoid_list: list[str] = field(default_factory=list)
-    avoid_other: str | None = None
 
 
 @dataclass
@@ -53,6 +52,7 @@ class UserPreferenceProfile:
     layer2: Layer2Profile | None = None
     layer3: Layer3Profile | None = None
     personal_info: PersonalInfoProfile | None = None
+    num_recommendations: int = 5
 
     def to_dict(self) -> dict:
         return asdict(self)

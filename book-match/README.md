@@ -7,13 +7,17 @@ to consume. No recommender is implemented here yet.
 
 ## Design
 
-Three layers, each a self-contained screen the user can stop after:
+Four layers, each a self-contained screen the user can stop after, followed
+by a summary screen:
 
 - **Layer 1 (required, ~30-60s, no typing needed):** search for books you've
   liked, and/or pick genre and mood chips.
 - **Layer 2 (optional):** sliders/toggles for pacing, tone, complexity,
-  length, and an avoid-list.
+  length, and an avoid-list (fixed set of chips, no free-text option).
 - **Layer 3 (optional):** one free-text box for anything else, stored as-is.
+- **Layer 4 (optional):** age, country, and city.
+- **Summary:** review everything, choose how many book recommendations to
+  receive (1-10, defaults to 5), and download the profile as JSON.
 
 A sidebar "Finish now" button is available from Layer 2 onward, so the user
 can stop at any point without losing what they've already given.
