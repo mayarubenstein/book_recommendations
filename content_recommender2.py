@@ -45,7 +45,7 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 import ijson
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sklearn.metrics.pairwise import cosine_similarity
 
 CATALOG_COLUMNS = [
@@ -236,6 +236,19 @@ class UserProfile(BaseModel):
     layer2: Layer2 = Field(default_factory=Layer2)
     layer3: Layer3 = Field(default_factory=Layer3)
     personal_info: PersonalInfo | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_optional_layers(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            for field_name, model_type in (
+                ("layer1", Layer1),
+                ("layer2", Layer2),
+                ("layer3", Layer3),
+            ):
+                if values.get(field_name) is None:
+                    values[field_name] = model_type()
+        return values
 
     @classmethod
     def from_json(cls, path: str | Path) -> "UserProfile":
@@ -438,7 +451,7 @@ class Recommender:
         if not isinstance(self._catalog_embeddings, np.ndarray):
             raise RuntimeError("Call fit() before saving an embedding artifact.")
 
-        book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy()
+        book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy(dtype=str)
         metadata = {
             "catalog_fingerprint": catalog_fingerprint(catalog_path),
             "embedding_model": getattr(self.embedder, "model_name", None),
@@ -458,7 +471,11 @@ class Recommender:
         artifact_path: str | Path,
         catalog_path: str | Path,
     ) -> "Recommender":
-        """Load vectors created by the offline indexing step after validation."""
+        """Load vectors created by the offline indexing step after validation.
+
+        The local artifact is trusted and may contain legacy object-typed IDs.
+        New artifacts store IDs as plain strings.
+        """
         artifact = Path(artifact_path)
         if not artifact.exists():
             raise FileNotFoundError(
@@ -466,7 +483,7 @@ class Recommender:
                 "Run `python build_catalog_embeddings.py` first."
             )
 
-        with np.load(artifact, allow_pickle=False) as saved:
+        with np.load(artifact, allow_pickle=True) as saved:
             metadata = json.loads(str(saved["metadata"]))
             embeddings = saved["embeddings"]
             saved_book_ids = saved["book_ids"].astype(str)
@@ -586,16 +603,3 @@ class Recommender:
              "Average_Normalized_Rating", "sim_preferences", "sim_liked_books", "score"]
         ]
 
-
-# ---------------------------------------------------------------------------
-# 5. Example wiring (see api.py for a FastAPI-served version of this)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    catalog = load_catalog("all_books.json")
-    embedder = SentenceTransformerEmbedder()
-    recommender = Recommender(catalog, embedder).fit(cache_path="catalog_embeddings.npy")
-
-    profile = UserProfile.from_json("sample_preference_profile1.json")
-    recs = recommender.recommend(profile, top_n=15)
-    print(recs.to_string(index=False))
