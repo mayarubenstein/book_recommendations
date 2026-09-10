@@ -356,8 +356,8 @@ class Recommender:
     def fit(self, cache_path: str | Path | None = None) -> "Recommender":
         """Embed every book once. This is the expensive step -- encoding
         ~326k books through a neural network, not a lookup -- so pass
-        cache_path to save the result to a .npy file and skip re-encoding on
-        every restart.
+        cache_path to save the result to a .npy file and resume from the last
+        completed batch after a restart.
 
         There's no automatic way to tell "the cache is still valid" from the
         file alone, so this does the one cheap check it can: if the cached
@@ -368,23 +368,65 @@ class Recommender:
         edited descriptions but kept the same row count) -- delete the cache
         file yourself whenever you regenerate all_books.json to be safe.
         """
-        texts = self.catalog["content_text"]
+        texts = list(self.catalog["content_text"])
 
         if cache_path is not None and Path(cache_path).exists():
-            cached = np.load(cache_path)
-            if len(cached) == len(self.catalog):
+            cached = np.load(cache_path, mmap_mode="r+")
+            progress_path = Path(f"{cache_path}.progress")
+            progress = None
+            if progress_path.exists():
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            if (
+                len(cached) == len(self.catalog)
+                and progress is None
+            ):
                 self._catalog_embeddings = cached
                 return self
-            print(
-                f"[fit] cache at {cache_path} has {len(cached)} rows but the catalog "
-                f"has {len(self.catalog)} -- re-embedding instead of using a stale cache."
-            )
+            if (
+                progress is not None
+                and progress.get("row_count") == len(self.catalog)
+                and progress.get("completed_rows", 0) < len(self.catalog)
+            ):
+                self.embedder.fit(texts)
+                start = int(progress["completed_rows"])
+                print(f"[fit] resuming embedding at row {start}/{len(texts)}")
+            else:
+                print(f"[fit] discarding stale or incomplete cache at {cache_path}")
+                Path(cache_path).unlink()
+                progress_path.unlink(missing_ok=True)
+                cached = None
+                start = 0
+        else:
+            cached = None
+            start = 0
 
         self.embedder.fit(texts)
-        self._catalog_embeddings = self.embedder.encode(list(texts))
+        batch_size = 4096
+        progress_path = Path(f"{cache_path}.progress") if cache_path is not None else None
+        for batch_start in range(start, len(texts), batch_size):
+            batch_end = min(batch_start + batch_size, len(texts))
+            batch = self.embedder.encode(texts[batch_start:batch_end])
+            if cache_path is None:
+                if self._catalog_embeddings is None:
+                    self._catalog_embeddings = np.empty((len(texts), batch.shape[1]), dtype=batch.dtype)
+                self._catalog_embeddings[batch_start:batch_end] = batch
+                continue
+            if cached is None:
+                Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+                cached = np.lib.format.open_memmap(
+                    cache_path, mode="w+", dtype=batch.dtype,
+                    shape=(len(texts), batch.shape[1]),
+                )
+            cached[batch_start:batch_end] = batch
+            cached.flush()
+            progress_path.write_text(
+                json.dumps({"row_count": len(texts), "completed_rows": batch_end}),
+                encoding="utf-8",
+            )
 
-        if cache_path is not None and isinstance(self._catalog_embeddings, np.ndarray):
-            np.save(cache_path, self._catalog_embeddings)
+        self._catalog_embeddings = cached if cache_path is not None else self._catalog_embeddings
+        if progress_path is not None:
+            progress_path.unlink(missing_ok=True)
         return self
 
     def save_embedding_artifact(
