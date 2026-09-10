@@ -48,6 +48,15 @@ version, and a fingerprint of the exact catalog file. FastAPI loads this artifac
 at startup and does not re-embed books for each request. If the catalog or model
 changes, rerun the indexing command.
 
+Do not run `content_recommender2.py` to start the application. It is the core
+library module and does not run an embedding job when imported. Use `api.py`
+through Uvicorn for the backend, or use `main.py` to send a profile to an
+already-running backend from the command line:
+
+```powershell
+python main.py --profile sample_preference_profile1.json --count 5
+```
+
 `all-mpnet-base-v2` (768 dimensions) may be evaluated later. Switching models
 requires changing the configured model and regenerating the artifact.
 
