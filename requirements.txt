@@ -7,3 +7,4 @@ scikit-learn>=1.5
 sentence-transformers>=3.0
 ijson>=3.3
 python-dotenv>=1.0
+openai>=1.0

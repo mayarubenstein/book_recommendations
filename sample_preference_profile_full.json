@@ -1,0 +1,55 @@
+{
+  "user_id": "f3e8a1c2-9b4d-4e6a-8f21-7d5c3b9a0e17",
+  "locale": "en",
+  "schema_version": "1.1",
+  "created_at": "2026-09-02T09:30:00.000000+00:00",
+  "layer1": {
+    "liked_books": [
+      {
+        "book_id": "mock-002",
+        "title": "The Hobbit",
+        "authors": "J.R.R. Tolkien"
+      },
+      {
+        "book_id": "mock-016",
+        "title": "Circe",
+        "authors": "Madeline Miller"
+      },
+      {
+        "book_id": "mock-009",
+        "title": "Project Hail Mary",
+        "authors": "Andy Weir"
+      }
+    ],
+    "selected_genres": [
+      "Fantasy",
+      "Science Fiction",
+      "Historical Fiction"
+    ],
+    "selected_moods": [
+      "epic_sweeping",
+      "quiet_introspective",
+      "mind_bending"
+    ]
+  },
+  "layer2": {
+    "plot_vs_character": 65,
+    "pace": 40,
+    "complexity": 55,
+    "length_preference": "medium",
+    "tone": 70,
+    "avoid_list": [
+      "graphic_violence",
+      "animal_harm"
+    ]
+  },
+  "layer3": {
+    "free_text": "I love intricate magic systems and morally complex characters, but nothing with a tragic ending. Bonus points for found-family dynamics."
+  },
+  "personal_info": {
+    "age": 29,
+    "country": "Israel",
+    "city": "Tel Aviv"
+  },
+  "num_recommendations": 8
+}
