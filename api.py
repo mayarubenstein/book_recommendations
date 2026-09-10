@@ -60,7 +60,8 @@ def recommend(
     profile: UserProfile,
     top_n: int = Query(default=20, ge=1, le=100),
 ) -> list[BookRecommendation]:
-    recs = state["recommender"].recommend(profile, top_n=top_n)
+    candidate_count = top_n * 2
+    recs = state["recommender"].recommend(profile, top_n=candidate_count)
 
     # A DataFrame isn't directly JSON-safe: NaN (e.g. a book missing a
     # rating) isn't valid JSON and most clients will choke on it. Swap NaN
