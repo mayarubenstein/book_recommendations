@@ -120,18 +120,11 @@ def render(profile_store: ProfileStore) -> None:
         st.markdown(f"**{t('summary.section.about_you')}**")
         st.markdown("\n".join(lines))
 
-    top_n = st.number_input(
-        "Number of recommendations",
-        min_value=1,
-        max_value=100,
-        value=10,
-        step=1,
-    )
     if st.button("Get recommendations", type="primary", use_container_width=True):
         try:
             response = requests.post(
                 f"{_API_URL}/recommend",
-                params={"top_n": top_n},
+                params={"top_n": profile.num_recommendations},
                 json=profile.to_dict(),
                 timeout=120,
             )
