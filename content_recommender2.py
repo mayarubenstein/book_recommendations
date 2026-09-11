@@ -12,10 +12,11 @@ Fits the data you actually have:
     single user, every time. Every field in it is optional; UserProfile below
     reflects that (defaults everywhere, nothing required to construct one).
 
-Approach: content-based filtering, blending THREE signals per book:
+Approach: content-based filtering, blending FOUR signals per book:
   1. similarity to the user's stated preferences (genres/moods/sliders/free text)
   2. similarity to books the user says they already loved
-  3. a Bayesian-adjusted popularity prior (so a book with 2 five-star reviews
+    3. similarity between the user's demographics and reviewer demographics
+    4. a Bayesian-adjusted popularity prior (so a book with 2 five-star reviews
      doesn't outrank one with 5,000 reviews averaging 4.3)
 ...then hard-filters on avoid_list / already-liked books.
 
@@ -36,6 +37,7 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -45,13 +47,136 @@ import pandas as pd
 from pydantic import BaseModel, Field
 from sklearn.metrics.pairwise import cosine_similarity
 
+
+# Input: a review record (dict or JSON string). Output: it as a dict, or None if unusable.
+def _as_review_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, Mapping) else None
+    return None
+
+
+# Input: a raw age value. Output: it as a float, if it's a plausible human age (0-120), else None.
+def _valid_age(age: Any) -> float | None:
+    try:
+        numeric_age = float(age)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= numeric_age <= 120:
+        return None
+    return numeric_age
+
+
+# Input: a raw age value. Output: its decade bucket (e.g. "age 30-39"), or None if invalid.
+def _age_bucket(age: Any) -> str | None:
+    numeric_age = _valid_age(age)
+    if numeric_age is None:
+        return None
+    lower = int(numeric_age // 10 * 10)
+    return f"age {lower}-{lower + 9}"
+
+
+# Input: a decade-bucket label like "age 30-39". Output: its numeric midpoint (34.5), or None if unparseable.
+def _bucket_midpoint(bucket: str) -> float | None:
+    match = re.fullmatch(r"age (\d+)-(\d+)", bucket)
+    if not match:
+        return None
+    low, high = int(match.group(1)), int(match.group(2))
+    return (low + high) / 2
+
+
+# Input: a location string. Output: a set of normalized lowercase place tokens.
+def _location_keys(location: Any) -> set[str]:
+    if not isinstance(location, str) or not location.strip():
+        return set()
+    parts = set()
+    for component in location.split(","):
+        value = re.sub(r"[^a-zA-Z ]", " ", component.lower())
+        value = re.sub(r"\s+", " ", value).strip()
+        if value:
+            parts.add(value)
+    return parts
+
+
+# Input: a book's review list. Output: (age_buckets, locations) sets aggregated across all reviewers.
+def _reviewer_demographics(reviews: Any) -> tuple[set[str], set[str]]:
+    age_buckets: set[str] = set()
+    locations: set[str] = set()
+    if not isinstance(reviews, list):
+        return age_buckets, locations
+    for review in reviews:
+        review_mapping = _as_review_mapping(review)
+        demographics = review_mapping.get("user_demographics") if review_mapping else None
+        if not isinstance(demographics, Mapping):
+            continue
+        age = _age_bucket(demographics.get("age"))
+        location = _location_keys(demographics.get("location"))
+        if age:
+            age_buckets.add(age)
+        locations.update(location)
+    return age_buckets, locations
+
+
+# Input: a book's review list. Output: one location-token set per review that reported a location.
+def _reviewer_location_sets(reviews: Any) -> list[set[str]]:
+    sets: list[set[str]] = []
+    if not isinstance(reviews, list):
+        return sets
+    for review in reviews:
+        review_mapping = _as_review_mapping(review)
+        demographics = review_mapping.get("user_demographics") if review_mapping else None
+        if not isinstance(demographics, Mapping):
+            continue
+        location = _location_keys(demographics.get("location"))
+        if location:
+            sets.append(location)
+    return sets
+
+
+# Input: a book's review list. Output: a text string naming reviewer age/location, for embedding.
+def _reviewer_demographic_text(reviews: Any) -> str:
+    age_buckets, locations = _reviewer_demographics(reviews)
+    parts = [f"reviewers {age}" for age in sorted(age_buckets)]
+    parts.extend(f"reviewers from {location}" for location in sorted(locations))
+    return " ".join(parts)
+
+
+# Input: a book's review list and a character cap. Output: concatenated review excerpt text.
+def _review_text(reviews: Any, max_chars: int = 1600) -> str:
+    excerpts: list[str] = []
+    used_chars = 0
+    if not isinstance(reviews, list):
+        return ""
+    for review in reviews:
+        review_mapping = _as_review_mapping(review)
+        if not review_mapping:
+            continue
+        parts = [
+            value.strip()
+            for key in ("summary", "text")
+            if isinstance(value := review_mapping.get(key), str) and value.strip()
+        ]
+        excerpt = " ".join(parts)
+        if not excerpt:
+            continue
+        remaining = max_chars - used_chars
+        if remaining <= 0:
+            break
+        excerpts.append(excerpt[:remaining])
+        used_chars += min(len(excerpt), remaining)
+    return " ".join(excerpts)
+
 # ---------------------------------------------------------------------------
 # 1. Loading the book catalog produced by creating_one_file.ipynb
 # ---------------------------------------------------------------------------
 
+# Input: path to all_books.json. Output: a DataFrame with a combined content_text column per book.
 def load_catalog(json_path: str | Path) -> pd.DataFrame:
-    """Load all_books.json into a DataFrame and add a single text field per
-    book that we'll embed. Missing text fields degrade gracefully."""
     with open(json_path, "r", encoding="utf-8") as f:
         records = json.load(f)
     df = pd.DataFrame(records)
@@ -60,6 +185,7 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = None
 
+    # Input: a raw Authors field value. Output: it as a plain string.
     def _authors_to_str(value: Any) -> str:
         if value is None:
             return ""
@@ -76,13 +202,30 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         df["Clean_Title"].fillna(df["_title_str"]).astype(str).str.strip().str.lower()
     )
 
-    # Genre/author repeated so they weigh more than one-off description words
-    # once embedded.
+    reviews = df.get("Reviews_List", pd.Series(index=df.index))
+    df["_demographic_age_buckets"] = reviews.apply(
+        lambda value: _reviewer_demographics(value)[0]
+    )
+    df["_demographic_location_sets"] = reviews.apply(_reviewer_location_sets)
+    df["_review_text"] = reviews.apply(_review_text)
+    df["_demographic_text"] = reviews.apply(_reviewer_demographic_text)
+    # Keep review excerpts before the description and demographic tail because
+    # SentenceTransformerEmbedder truncates long book texts.
+    # Title is mentioned once, not repeated: repeating it would pull books
+    # with superficially similar titles (shared words, unrelated meaning)
+    # closer together in embedding space, which isn't a signal we want.
+    # Genre/author repetition is intentional -- clustering books that share a
+    # genre or author is exactly the desired effect there.
     df["content_text"] = (
-        (df["_title_str"] + " ") * 2
+        df["_title_str"] + " "
         + (df["_genre_str"] + " ") * 3
         + (df["_authors_str"] + " ") * 2
+        + " review excerpts "
+        + df["_review_text"]
+        + " "
         + df["_desc_str"]
+        + " "
+        + df["_demographic_text"]
     ).str.lower()
 
     df["Review_Count"] = pd.to_numeric(df["Review_Count"], errors="coerce").fillna(0)
@@ -103,21 +246,22 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
 # Recommender.recommend below).
 
 
+# Schema: one liked book (book_id/title/authors); all fields optional.
 class LikedBook(BaseModel):
     book_id: str | None = None
     title: str | None = None
     authors: str | None = None
 
 
+# Schema: liked books, selected genres, and selected moods.
 class Layer1(BaseModel):
-    """Quiz basics: books/genres/moods the user explicitly picked."""
     liked_books: list[LikedBook] = Field(default_factory=list)
     selected_genres: list[str] = Field(default_factory=list)
     selected_moods: list[str] = Field(default_factory=list)
 
 
+# Schema: preference sliders (0-100) plus the hard avoid-list.
 class Layer2(BaseModel):
-    """Slider preferences (0-100) plus hard constraints."""
     plot_vs_character: float | None = None
     pace: float | None = None
     complexity: float | None = None
@@ -126,19 +270,21 @@ class Layer2(BaseModel):
     avoid_list: list[str] = Field(default_factory=list)
 
 
+# Schema: user age plus location, as a combined string or as separate country/city.
+class Demographics(BaseModel):
+    age: float | None = None
+    location: str | None = None
+    country: str | None = None
+    city: str | None = None
+
+
+# Schema: the user's free-text taste description.
 class Layer3(BaseModel):
-    """Free-form taste description in the user's own words."""
     free_text: str = ""
 
 
+# Input: a 0-100 slider value and its low/mid/high labels. Output: a graded phrase, or None.
 def _describe_slider(value: float | None, low: str, mid: str, high: str) -> str | None:
-    """Turn a 0-100 slider into a graded phrase instead of one hard cutoff.
-    A semantic embedder can tell "somewhat slow-paced" apart from "very
-    slow-paced". This still hand-picks 5 buckets,
-    but the buckets are just there to turn a number into words the model can
-    read -- the actual similarity judgment (is "very slow-paced" close to
-    "leisurely, unhurried"?) is the embedder's job now, not a keyword table's.
-    """
     if value is None:
         return None
     if value <= 15:
@@ -152,31 +298,26 @@ def _describe_slider(value: float | None, low: str, mid: str, high: str) -> str 
     return f"very {high}"
 
 
+# Schema: the full onboarding profile (identifiers, demographics, layer1-3); all fields optional.
 class UserProfile(BaseModel):
     user_id: str | None = None
     locale: str | None = None
     schema_version: str | None = None
     created_at: str | None = None
+    age: float | None = None
+    location: str | None = None
+    demographics: Demographics = Field(default_factory=Demographics)
     layer1: Layer1 = Field(default_factory=Layer1)
     layer2: Layer2 = Field(default_factory=Layer2)
     layer3: Layer3 = Field(default_factory=Layer3)
 
+    # Input: a JSON file path. Output: a validated UserProfile.
     @classmethod
     def from_json(cls, path: str | Path) -> "UserProfile":
         return cls.model_validate_json(Path(path).read_text(encoding="utf-8"))
 
+    # Input: none (uses self). Output: one text string encoding all stated preferences, for embedding.
     def to_query_text(self) -> str:
-        """Text for the 'stated preferences' signal. Deliberately excludes
-        liked_books -- those get their own similarity signal in Recommender
-        (see _resolve_liked_books) so they're not double-counted.
-
-        No more hand-written mood-keyword dictionary: a mood tag like
-        "quiet_introspective" is just turned into the words "quiet
-        introspective" and handed to the embedder as-is. A pretrained
-        sentence embedder already knows what that phrase is semantically
-        close to; a synonym table hand-authored by me was never going to be
-        as good a source of truth as the model's own training data.
-        """
         l1, l2, l3 = self.layer1, self.layer2, self.layer3
         parts: list[str | None] = []
         parts += l1.selected_genres * 3  # explicit genre picks matter most
@@ -193,7 +334,22 @@ class UserProfile(BaseModel):
             parts.append(f"{l2.length_preference}-length book")
         if l3.free_text:
             parts.append(l3.free_text)
+        age = self.demographics.age if self.demographics.age is not None else self.age
+        age_text = _age_bucket(age)
+        location_parts = _profile_location_keys(self)
+        if age_text:
+            parts.append(f"user {age_text}")
+        parts.extend(f"user from {part}" for part in sorted(location_parts))
         return " ".join(p for p in parts if p).lower()
+
+
+# Input: a UserProfile. Output: the union of its location tokens from location/country/city.
+def _profile_location_keys(profile: "UserProfile") -> set[str]:
+    keys: set[str] = set()
+    keys |= _location_keys(profile.demographics.location or profile.location)
+    keys |= _location_keys(profile.demographics.country)
+    keys |= _location_keys(profile.demographics.city)
+    return keys
 
 
 AVOID_KEYWORDS = {
@@ -207,33 +363,24 @@ AVOID_KEYWORDS = {
 # 3. Embedding backend
 # ---------------------------------------------------------------------------
 
+# Interface: any embedding backend must implement fit() and encode().
 class Embedder(ABC):
-    """Common interface between the catalog side and the query side of
-    Recommender, so the scoring logic doesn't care what produced the
-    vectors."""
 
+    # Input: catalog texts. Output: none; learns backend-specific state (no-op for a pretrained model).
     @abstractmethod
     def fit(self, texts: Sequence[str]) -> None:
-        """Learn anything backend-specific from the catalog text. No-op for
-        a pretrained model."""
+        ...
 
+    # Input: a list of texts. Output: one embedding vector per text.
     @abstractmethod
     def encode(self, texts: Sequence[str]) -> np.ndarray:
-        """Return a dense array with one row per text."""
+        ...
 
 
+# Embedding backend: a pretrained sentence-transformer model (e.g. all-MiniLM-L6-v2).
 class SentenceTransformerEmbedder(Embedder):
-    """A pretrained semantic embedding model. Needs
-    `pip install sentence-transformers` and, the first time it runs, network
-    access to download model weights from Hugging Face Hub (a few hundred MB,
-    cached locally afterwards -- fully offline after that first call).
 
-    'all-MiniLM-L6-v2' (384-dim) is the usual default: fast on CPU, good
-    quality for this kind of similarity search. 'all-mpnet-base-v2' (768-dim)
-    is noticeably better and noticeably slower -- worth trying once you've
-    validated the pipeline end to end with the smaller model.
-    """
-
+    # Input: model name, max chars, batch size. Output: none; loads the pretrained model.
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", max_chars: int = 800,
                  batch_size: int = 128):
         from sentence_transformers import SentenceTransformer  # deferred import
@@ -242,9 +389,11 @@ class SentenceTransformerEmbedder(Embedder):
         self.max_chars = max_chars
         self.batch_size = batch_size
 
+    # Input: catalog texts. Output: none; a pretrained model needs no fitting.
     def fit(self, texts: Sequence[str]) -> None:
-        pass  # pretrained -- nothing to fit
+        pass
 
+    # Input: a list of texts. Output: their normalized embedding vectors.
     def encode(self, texts: Sequence[str]) -> np.ndarray:
         truncated = [t[: self.max_chars] for t in texts]
         return self.model.encode(
@@ -261,27 +410,15 @@ class SentenceTransformerEmbedder(Embedder):
 #    popularity prior, then hard filters
 # ---------------------------------------------------------------------------
 
+# Holds a book catalog and an embedder: fit() embeds the catalog once, recommend() scores it per user.
 @dataclass
 class Recommender:
     catalog: pd.DataFrame
     embedder: Embedder
     _catalog_embeddings: Any = field(default=None, repr=False)
 
+    # Input: an optional cache path. Output: self, with every catalog book embedded.
     def fit(self, cache_path: str | Path | None = None) -> "Recommender":
-        """Embed every book once. This is the expensive step -- encoding
-        ~326k books through a neural network, not a lookup -- so pass
-        cache_path to save the result to a .npy file and skip re-encoding on
-        every restart.
-
-        There's no automatic way to tell "the cache is still valid" from the
-        file alone, so this does the one cheap check it can: if the cached
-        row count doesn't match the current catalog's row count, the catalog
-        clearly changed since the cache was built, and it re-embeds instead
-        of silently serving recommendations built from a stale/mismatched
-        catalog. That check does NOT catch every kind of staleness (e.g. you
-        edited descriptions but kept the same row count) -- delete the cache
-        file yourself whenever you regenerate all_books.json to be safe.
-        """
         texts = self.catalog["content_text"]
 
         if cache_path is not None and Path(cache_path).exists():
@@ -301,22 +438,50 @@ class Recommender:
             np.save(cache_path, self._catalog_embeddings)
         return self
 
+    # Input: a minimum-reviews threshold. Output: a shrinkage-adjusted rating per book.
     def _bayesian_rating(self, min_reviews: int = 20) -> pd.Series:
-        """IMDB-style shrinkage so a book with 2 five-star reviews doesn't
-        outrank one with 5,000 reviews averaging 4.3."""
         r = self.catalog["Average_Normalized_Rating"]
         v = self.catalog["Review_Count"]
         c = r.mean(skipna=True)
         m = min_reviews
         return (v / (v + m)) * r.fillna(c) + (m / (v + m)) * c
 
+    # Input: a UserProfile. Output: a per-book demographic-overlap score (neutral 0.5 if data is missing).
+    def _demographic_similarity(self, profile: UserProfile) -> np.ndarray:
+        age = profile.demographics.age if profile.demographics.age is not None else profile.age
+        user_age = _valid_age(age)
+        user_locations = _profile_location_keys(profile)
+        if user_age is None and not user_locations:
+            return np.full(len(self.catalog), 0.5)
+
+        similarities: list[float] = []
+        for age_buckets, location_sets in zip(
+            self.catalog["_demographic_age_buckets"],
+            self.catalog["_demographic_location_sets"],
+        ):
+            component_scores: list[float] = []
+            if user_age is not None and age_buckets:
+                # Smooth decay on the gap to the closest reviewer age-bucket,
+                # instead of an all-or-nothing same-bucket check -- so a user
+                # aged 51 scores close to a book whose reviewers are "40-49",
+                # rather than as unrelated as a user aged 20.
+                midpoints = [m for b in age_buckets if (m := _bucket_midpoint(b)) is not None]
+                if midpoints:
+                    closest_gap = min(abs(user_age - m) for m in midpoints)
+                    component_scores.append(1 / (1 + closest_gap / 10))
+            if user_locations and location_sets:
+                # What fraction of this book's location-tagged reviewers share
+                # a location with the user, not just whether any single one
+                # happens to -- so a book overwhelmingly read by people from
+                # the user's country/city scores higher than one where a
+                # single reviewer coincidentally matches.
+                matching = sum(1 for loc_set in location_sets if user_locations & loc_set)
+                component_scores.append(matching / len(location_sets))
+            similarities.append(float(np.mean(component_scores)) if component_scores else 0.5)
+        return np.asarray(similarities)
+
+    # Input: a UserProfile. Output: matched liked-book embeddings (or None) and any titles not found.
     def _resolve_liked_books(self, profile: UserProfile) -> tuple[Any, list[str]]:
-        """Match liked_books against the catalog by cleaned title so we can
-        reuse each liked book's *own* embedding (built from its real
-        description/genre) rather than just its bare title string. Entries
-        with no title (allowed -- everything in a liked book entry is
-        optional) can't be matched to anything and are skipped. Returns
-        (embeddings-for-matched-books-or-None, titles-not-found)."""
         wanted = {b.title.strip().lower() for b in profile.layer1.liked_books if b.title}
         if not wanted:
             return None, []
@@ -331,26 +496,21 @@ class Recommender:
 
         return self._catalog_embeddings[matched_positions], not_found
 
+    # Input: a UserProfile and scoring options (weights, top_n, liked_agg). Output: the top_n ranked books.
     def recommend(
         self,
         profile: UserProfile,
         top_n: int = 20,
-        weights: tuple[float, float, float] = (0.45, 0.35, 0.20),
+        weights: tuple[float, ...] = (0.40, 0.30, 0.10, 0.20),
         liked_agg: str = "mean",
     ) -> pd.DataFrame:
-        """weights = (stated_preferences, liked_books, popularity). If the
-        profile has no liked books we can match -- including a profile with
-        nothing filled in at all -- liked_books weight is redistributed to
-        stated_preferences; if stated preferences are ALSO empty, sim_pref is
-        uniformly ~0 too, and score collapses to just the popularity prior.
-        That's intentional: a maximally empty profile falls back to "show the
-        most reliably good books," which is a reasonable cold-start default.
-
-        liked_agg: "mean" blends the vibe of everything they liked into one
-        target; "max" instead surfaces books close to any ONE loved book --
-        better when someone's liked list spans very different genres/moods.
-        """
-        w_pref, w_liked, w_pop = weights
+        if len(weights) == 3:
+            w_pref, w_liked, w_pop = weights
+            w_demo = 0.0
+        elif len(weights) == 4:
+            w_pref, w_liked, w_demo, w_pop = weights
+        else:
+            raise ValueError("weights must contain 3 or 4 values")
 
         pref_vec = self.embedder.encode([profile.to_query_text()])
         sim_pref = cosine_similarity(pref_vec, self._catalog_embeddings).ravel()
@@ -369,12 +529,19 @@ class Recommender:
 
         pop = self._bayesian_rating()
         pop_norm = ((pop - pop.min()) / (pop.max() - pop.min() + 1e-9)).to_numpy()
+        sim_demo = self._demographic_similarity(profile)
 
-        score = w_pref * sim_pref + w_liked * sim_liked + w_pop * pop_norm
+        score = (
+            w_pref * sim_pref
+            + w_liked * sim_liked
+            + w_demo * sim_demo
+            + w_pop * pop_norm
+        )
 
         result = self.catalog.copy()
         result["sim_preferences"] = sim_pref
         result["sim_liked_books"] = sim_liked
+        result["sim_demographics"] = sim_demo
         result["score"] = score
 
         # Hard filters -- deterministic constraints, not signals to blend in,
@@ -392,7 +559,8 @@ class Recommender:
         result = result[mask]
         return result.sort_values("score", ascending=False).head(top_n)[
             ["Book ID", "Title", "Authors", "Category/Genre", "Review_Count",
-             "Average_Normalized_Rating", "sim_preferences", "sim_liked_books", "score"]
+               "Average_Normalized_Rating", "sim_preferences", "sim_liked_books",
+               "sim_demographics", "score"]
         ]
 
 
