@@ -15,7 +15,7 @@ import numpy as np
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from content_recommender import Recommender, SentenceTransformerEmbedder, UserProfile, load_catalog
+from content_recommender2 import Recommender, SentenceTransformerEmbedder, UserProfile, load_catalog
 
 CATALOG_PATH = "all_books.json"
 CACHE_PATH = "catalog_embeddings.npy"
@@ -48,6 +48,7 @@ class BookRecommendation(BaseModel):
     average_rating: float | None
     sim_preferences: float
     sim_liked_books: float
+    sim_demographics: float
     score: float
 
 
@@ -70,6 +71,7 @@ def recommend(profile: UserProfile, top_n: int = 20) -> list[BookRecommendation]
             average_rating=row["Average_Normalized_Rating"],
             sim_preferences=row["sim_preferences"],
             sim_liked_books=row["sim_liked_books"],
+            sim_demographics=row["sim_demographics"],
             score=row["score"],
         )
         for _, row in recs.iterrows()
