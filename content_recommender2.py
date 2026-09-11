@@ -401,8 +401,7 @@ class UserProfile(BaseModel):
             parts.append(f"avoid {l2.avoid_other}")
         if l3.free_text:
             parts.append(l3.free_text)
-        age = self.demographics.age if self.demographics.age is not None else self.age
-        age_text = _age_bucket(age)
+        age_text = _age_bucket(_profile_age(self))
         location_parts = _profile_location_keys(self)
         if age_text:
             parts.append(f"user {age_text}")
@@ -417,12 +416,30 @@ class UserProfile(BaseModel):
         return " ".join(p for p in parts if p).lower()
 
 
-# Input: a UserProfile. Output: the union of its location tokens from location/country/city.
+# Input: a UserProfile. Output: its age from whichever field actually carries
+# it -- demographics, the legacy top-level field, or personal_info -- so a
+# profile shaped like the real frontend's (personal_info-only) still gets a
+# usable age instead of silently falling back to "no data".
+def _profile_age(profile: "UserProfile") -> float | None:
+    if profile.demographics.age is not None:
+        return profile.demographics.age
+    if profile.age is not None:
+        return profile.age
+    if profile.personal_info and profile.personal_info.age is not None:
+        return profile.personal_info.age
+    return None
+
+
+# Input: a UserProfile. Output: the union of its location tokens from
+# location/country/city, checking both demographics and personal_info.
 def _profile_location_keys(profile: "UserProfile") -> set[str]:
     keys: set[str] = set()
     keys |= _location_keys(profile.demographics.location or profile.location)
     keys |= _location_keys(profile.demographics.country)
     keys |= _location_keys(profile.demographics.city)
+    if profile.personal_info:
+        keys |= _location_keys(profile.personal_info.country)
+        keys |= _location_keys(profile.personal_info.city)
     return keys
 
 
@@ -646,8 +663,7 @@ class Recommender:
 
     # Input: a UserProfile. Output: a per-book demographic-overlap score (neutral 0.5 if data is missing).
     def _demographic_similarity(self, profile: UserProfile) -> np.ndarray:
-        age = profile.demographics.age if profile.demographics.age is not None else profile.age
-        user_age = _valid_age(age)
+        user_age = _valid_age(_profile_age(profile))
         user_locations = _profile_location_keys(profile)
         if user_age is None and not user_locations:
             return np.full(len(self.catalog), 0.5)
