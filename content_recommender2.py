@@ -34,7 +34,9 @@ docstring there for how staleness is handled if the catalog changes.
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -44,8 +46,25 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, Field
+import ijson
+from pydantic import BaseModel, Field, model_validator
 from sklearn.metrics.pairwise import cosine_similarity
+
+CATALOG_COLUMNS = [
+    "Title",
+    "Clean_Title",
+    "Description",
+    "Authors",
+    "Category/Genre",
+    "ISBN/ID",
+    "Book ID",
+    "Review_Count",
+    "Reviews_List",
+    "Average_Normalized_Rating",
+]
+# Bumped from "metadata-and-reviews-v2": content_text now also folds in
+# reviewer age/location text, so old cached artifacts must be rebuilt.
+EMBEDDING_TEXT_VERSION = "metadata-reviews-demographics-v3"
 
 
 # Input: a review record (dict or JSON string). Output: it as a dict, or None if unusable.
@@ -146,40 +165,56 @@ def _reviewer_demographic_text(reviews: Any) -> str:
     return " ".join(parts)
 
 
-# Input: a book's review list and a character cap. Output: concatenated review excerpt text.
-def _review_text(reviews: Any, max_chars: int = 1600) -> str:
-    excerpts: list[str] = []
-    used_chars = 0
-    if not isinstance(reviews, list):
-        return ""
-    for review in reviews:
-        review_mapping = _as_review_mapping(review)
-        if not review_mapping:
-            continue
-        parts = [
-            value.strip()
-            for key in ("summary", "text")
-            if isinstance(value := review_mapping.get(key), str) and value.strip()
-        ]
-        excerpt = " ".join(parts)
-        if not excerpt:
-            continue
-        remaining = max_chars - used_chars
-        if remaining <= 0:
-            break
-        excerpts.append(excerpt[:remaining])
-        used_chars += min(len(excerpt), remaining)
-    return " ".join(excerpts)
-
 # ---------------------------------------------------------------------------
 # 1. Loading the book catalog produced by creating_one_file.ipynb
 # ---------------------------------------------------------------------------
 
-# Input: path to all_books.json. Output: a DataFrame with a combined content_text column per book.
+def _iter_catalog_records(json_path: str | Path):
+    with open(json_path, "rb") as catalog_file:
+        yield from ijson.items(catalog_file, "item")
+
+
+def _reviews_to_text(reviews: Any, max_reviews: int = 8, max_chars: int = 2400) -> str:
+    """Keep a bounded, source-tolerant text sample from each book's reviews."""
+    if not isinstance(reviews, list):
+        return ""
+
+    parts: list[str] = []
+    for review in reviews[:max_reviews]:
+        if not isinstance(review, dict):
+            continue
+        summary = str(review.get("summary") or "").strip()
+        text = str(review.get("text") or "").strip()
+        if summary:
+            parts.append(f"review summary: {summary}")
+        if text:
+            parts.append(f"reader review: {text}")
+        if sum(len(part) for part in parts) >= max_chars:
+            break
+    return " ".join(parts)[:max_chars]
+
+
 def load_catalog(json_path: str | Path) -> pd.DataFrame:
-    with open(json_path, "r", encoding="utf-8") as f:
-        records = json.load(f)
-    df = pd.DataFrame(records)
+    """Load all_books.json into a DataFrame and add a single text field per
+    book that we'll embed. Missing text fields degrade gracefully."""
+    records = []
+    # Reviews_List is kept (not excluded like the rest of CATALOG_COLUMNS
+    # would suggest) because the reviewer-demographics pipeline below needs
+    # each review's raw user_demographics block, not just the review text.
+    required_fields = set(CATALOG_COLUMNS)
+    for record in _iter_catalog_records(json_path):
+        if not isinstance(record, dict):
+            raise ValueError(f"Catalog at {json_path} must contain book objects.")
+        row = {field: record.get(field) for field in required_fields}
+        row["_reviews_text"] = _reviews_to_text(record.get("Reviews_List"))
+        records.append(row)
+    if not records:
+        raise ValueError(f"Catalog at {json_path} must contain at least one book.")
+    df = pd.DataFrame.from_records(records)
+
+    missing = [column for column in CATALOG_COLUMNS if column not in df.columns]
+    if missing:
+        raise ValueError(f"Catalog is missing required fields: {', '.join(missing)}")
 
     for col in ["Title", "Clean_Title", "Description", "Authors", "Category/Genre"]:
         if col not in df.columns:
@@ -207,10 +242,7 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         lambda value: _reviewer_demographics(value)[0]
     )
     df["_demographic_location_sets"] = reviews.apply(_reviewer_location_sets)
-    df["_review_text"] = reviews.apply(_review_text)
     df["_demographic_text"] = reviews.apply(_reviewer_demographic_text)
-    # Keep review excerpts before the description and demographic tail because
-    # SentenceTransformerEmbedder truncates long book texts.
     # Title is mentioned once, not repeated: repeating it would pull books
     # with superficially similar titles (shared words, unrelated meaning)
     # closer together in embedding space, which isn't a signal we want.
@@ -220,8 +252,8 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         df["_title_str"] + " "
         + (df["_genre_str"] + " ") * 3
         + (df["_authors_str"] + " ") * 2
-        + " review excerpts "
-        + df["_review_text"]
+        + " reviews "
+        + df["_reviews_text"].fillna("").astype(str)
         + " "
         + df["_desc_str"]
         + " "
@@ -233,6 +265,15 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
         df["Average_Normalized_Rating"], errors="coerce"
     )
     return df
+
+
+def catalog_fingerprint(json_path: str | Path) -> str:
+    """Return a stable fingerprint for the exact local catalog file."""
+    digest = hashlib.sha256()
+    with open(json_path, "rb") as catalog_file:
+        for chunk in iter(lambda: catalog_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +309,7 @@ class Layer2(BaseModel):
     length_preference: str | None = None
     tone: float | None = None
     avoid_list: list[str] = Field(default_factory=list)
+    avoid_other: str | None = None
 
 
 # Schema: user age plus location, as a combined string or as separate country/city.
@@ -281,6 +323,15 @@ class Demographics(BaseModel):
 # Schema: the user's free-text taste description.
 class Layer3(BaseModel):
     free_text: str = ""
+
+
+# Schema: a second, independent carrier of reader age/country/city, used only
+# in to_query_text()'s raw (unbucketed) text -- kept alongside Demographics
+# since it's not yet settled which shape the quiz frontend actually sends.
+class PersonalInfo(BaseModel):
+    age: int | None = None
+    country: str | None = None
+    city: str | None = None
 
 
 # Input: a 0-100 slider value and its low/mid/high labels. Output: a graded phrase, or None.
@@ -310,6 +361,20 @@ class UserProfile(BaseModel):
     layer1: Layer1 = Field(default_factory=Layer1)
     layer2: Layer2 = Field(default_factory=Layer2)
     layer3: Layer3 = Field(default_factory=Layer3)
+    personal_info: PersonalInfo | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_optional_layers(cls, values: Any) -> Any:
+        if isinstance(values, dict):
+            for field_name, model_type in (
+                ("layer1", Layer1),
+                ("layer2", Layer2),
+                ("layer3", Layer3),
+            ):
+                if values.get(field_name) is None:
+                    values[field_name] = model_type()
+        return values
 
     # Input: a JSON file path. Output: a validated UserProfile.
     @classmethod
@@ -332,6 +397,8 @@ class UserProfile(BaseModel):
         parts.append(_describe_slider(l2.tone, "dark and serious", "a mix of light and dark", "light and hopeful"))
         if l2.length_preference:
             parts.append(f"{l2.length_preference}-length book")
+        if l2.avoid_other:
+            parts.append(f"avoid {l2.avoid_other}")
         if l3.free_text:
             parts.append(l3.free_text)
         age = self.demographics.age if self.demographics.age is not None else self.age
@@ -340,6 +407,13 @@ class UserProfile(BaseModel):
         if age_text:
             parts.append(f"user {age_text}")
         parts.extend(f"user from {part}" for part in sorted(location_parts))
+        if self.personal_info:
+            if self.personal_info.age is not None:
+                parts.append(f"reader age {self.personal_info.age}")
+            if self.personal_info.country:
+                parts.append(f"reader country {self.personal_info.country}")
+            if self.personal_info.city:
+                parts.append(f"reader city {self.personal_info.city}")
         return " ".join(p for p in parts if p).lower()
 
 
@@ -385,7 +459,8 @@ class SentenceTransformerEmbedder(Embedder):
                  batch_size: int = 128):
         from sentence_transformers import SentenceTransformer  # deferred import
 
-        self.model = SentenceTransformer(model_name)
+        self.model_name = model_name
+        self.model = SentenceTransformer(model_name, token=os.getenv("HF_TOKEN"))
         self.max_chars = max_chars
         self.batch_size = batch_size
 
@@ -419,23 +494,146 @@ class Recommender:
 
     # Input: an optional cache path. Output: self, with every catalog book embedded.
     def fit(self, cache_path: str | Path | None = None) -> "Recommender":
-        texts = self.catalog["content_text"]
+        """Embed every book once. This is the expensive step -- encoding
+        ~326k books through a neural network, not a lookup -- so pass
+        cache_path to save the result to a .npy file and resume from the last
+        completed batch after a restart.
+
+        There's no automatic way to tell "the cache is still valid" from the
+        file alone, so this does the one cheap check it can: if the cached
+        row count doesn't match the current catalog's row count, the catalog
+        clearly changed since the cache was built, and it re-embeds instead
+        of silently serving recommendations built from a stale/mismatched
+        catalog. That check does NOT catch every kind of staleness (e.g. you
+        edited descriptions but kept the same row count) -- delete the cache
+        file yourself whenever you regenerate all_books.json to be safe.
+        """
+        texts = list(self.catalog["content_text"])
 
         if cache_path is not None and Path(cache_path).exists():
-            cached = np.load(cache_path)
-            if len(cached) == len(self.catalog):
+            cached = np.load(cache_path, mmap_mode="r+")
+            progress_path = Path(f"{cache_path}.progress")
+            progress = None
+            if progress_path.exists():
+                progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            if (
+                len(cached) == len(self.catalog)
+                and progress is None
+            ):
                 self._catalog_embeddings = cached
                 return self
-            print(
-                f"[fit] cache at {cache_path} has {len(cached)} rows but the catalog "
-                f"has {len(self.catalog)} -- re-embedding instead of using a stale cache."
-            )
+            if (
+                progress is not None
+                and progress.get("row_count") == len(self.catalog)
+                and progress.get("completed_rows", 0) < len(self.catalog)
+            ):
+                self.embedder.fit(texts)
+                start = int(progress["completed_rows"])
+                print(f"[fit] resuming embedding at row {start}/{len(texts)}")
+            else:
+                print(f"[fit] discarding stale or incomplete cache at {cache_path}")
+                Path(cache_path).unlink()
+                progress_path.unlink(missing_ok=True)
+                cached = None
+                start = 0
+        else:
+            cached = None
+            start = 0
 
         self.embedder.fit(texts)
-        self._catalog_embeddings = self.embedder.encode(list(texts))
+        batch_size = 4096
+        progress_path = Path(f"{cache_path}.progress") if cache_path is not None else None
+        for batch_start in range(start, len(texts), batch_size):
+            batch_end = min(batch_start + batch_size, len(texts))
+            batch = self.embedder.encode(texts[batch_start:batch_end])
+            if cache_path is None:
+                if self._catalog_embeddings is None:
+                    self._catalog_embeddings = np.empty((len(texts), batch.shape[1]), dtype=batch.dtype)
+                self._catalog_embeddings[batch_start:batch_end] = batch
+                continue
+            if cached is None:
+                Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
+                cached = np.lib.format.open_memmap(
+                    cache_path, mode="w+", dtype=batch.dtype,
+                    shape=(len(texts), batch.shape[1]),
+                )
+            cached[batch_start:batch_end] = batch
+            cached.flush()
+            progress_path.write_text(
+                json.dumps({"row_count": len(texts), "completed_rows": batch_end}),
+                encoding="utf-8",
+            )
 
-        if cache_path is not None and isinstance(self._catalog_embeddings, np.ndarray):
-            np.save(cache_path, self._catalog_embeddings)
+        self._catalog_embeddings = cached if cache_path is not None else self._catalog_embeddings
+        if progress_path is not None:
+            progress_path.unlink(missing_ok=True)
+        return self
+
+    def save_embedding_artifact(
+        self,
+        artifact_path: str | Path,
+        catalog_path: str | Path,
+    ) -> None:
+        """Persist catalog vectors and the metadata needed to validate them."""
+        if not isinstance(self._catalog_embeddings, np.ndarray):
+            raise RuntimeError("Call fit() before saving an embedding artifact.")
+
+        book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy(dtype=str)
+        metadata = {
+            "catalog_fingerprint": catalog_fingerprint(catalog_path),
+            "embedding_model": getattr(self.embedder, "model_name", None),
+            "embedding_text_version": EMBEDDING_TEXT_VERSION,
+            "row_count": len(self.catalog),
+        }
+        Path(artifact_path).parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            artifact_path,
+            embeddings=self._catalog_embeddings,
+            book_ids=book_ids,
+            metadata=json.dumps(metadata),
+        )
+
+    def load_embedding_artifact(
+        self,
+        artifact_path: str | Path,
+        catalog_path: str | Path,
+    ) -> "Recommender":
+        """Load vectors created by the offline indexing step after validation.
+
+        The local artifact is trusted and may contain legacy object-typed IDs.
+        New artifacts store IDs as plain strings.
+        """
+        artifact = Path(artifact_path)
+        if not artifact.exists():
+            raise FileNotFoundError(
+                f"Missing catalog embedding artifact: {artifact}. "
+                "Run `python build_catalog_embeddings.py` first."
+            )
+
+        with np.load(artifact, allow_pickle=True) as saved:
+            metadata = json.loads(str(saved["metadata"]))
+            embeddings = saved["embeddings"]
+            saved_book_ids = saved["book_ids"].astype(str)
+
+        expected_model = getattr(self.embedder, "model_name", None)
+        if metadata.get("catalog_fingerprint") != catalog_fingerprint(catalog_path):
+            raise ValueError(
+                "Catalog embedding artifact is stale because all_books.json changed. "
+                "Run `python build_catalog_embeddings.py` again."
+            )
+        if metadata.get("embedding_model") != expected_model:
+            raise ValueError(
+                f"Artifact model {metadata.get('embedding_model')!r} does not match "
+                f"the configured model {expected_model!r}. Rebuild the artifact."
+            )
+        if metadata.get("embedding_text_version") != EMBEDDING_TEXT_VERSION:
+            raise ValueError("Embedding text format changed. Rebuild the artifact.")
+
+        current_book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy()
+        if len(embeddings) != len(self.catalog) or not np.array_equal(saved_book_ids, current_book_ids):
+            raise ValueError("Catalog embedding artifact does not match the current catalog order.")
+
+        self._catalog_embeddings = embeddings
         return self
 
     # Input: a minimum-reviews threshold. Output: a shrinkage-adjusted rating per book.
@@ -563,16 +761,3 @@ class Recommender:
                "sim_demographics", "score"]
         ]
 
-
-# ---------------------------------------------------------------------------
-# 5. Example wiring (see api.py for a FastAPI-served version of this)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    catalog = load_catalog("all_books.json")
-    embedder = SentenceTransformerEmbedder()
-    recommender = Recommender(catalog, embedder).fit(cache_path="catalog_embeddings.npy")
-
-    profile = UserProfile.from_json("sample_preference_profile1.json")
-    recs = recommender.recommend(profile, top_n=15)
-    print(recs.to_string(index=False))

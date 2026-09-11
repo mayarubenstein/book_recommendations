@@ -1,5 +1,5 @@
 """
-Example FastAPI wiring for content_recommender.py.
+Example FastAPI wiring for content_recommender2.py.
 
 Run with:  uvicorn api:app --reload
 Interactive docs (auto-generated from the Pydantic models):
@@ -10,15 +10,17 @@ shape, POSTing that exact JSON to /recommend as the request body just works --
 FastAPI validates and parses it for you, no glue code needed.
 """
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from pydantic import BaseModel
 
 from content_recommender2 import Recommender, SentenceTransformerEmbedder, UserProfile, load_catalog
 
-CATALOG_PATH = "all_books.json"
-CACHE_PATH = "catalog_embeddings.npy"
+BASE_DIR = Path(__file__).resolve().parent
+CATALOG_PATH = BASE_DIR / "all_books.json"
+ARTIFACT_PATH = BASE_DIR / "catalog_embeddings.npz"
 
 # Populated once at startup, reused for every request. Re-embedding ~326k
 # books per request would make each call take minutes instead of
@@ -31,7 +33,9 @@ state: dict[str, Recommender] = {}
 async def lifespan(app: FastAPI):
     catalog = load_catalog(CATALOG_PATH)
     embedder = SentenceTransformerEmbedder()
-    state["recommender"] = Recommender(catalog, embedder).fit(cache_path=CACHE_PATH)
+    state["recommender"] = Recommender(catalog, embedder).load_embedding_artifact(
+        ARTIFACT_PATH, CATALOG_PATH
+    )
     yield
     state.clear()
 
@@ -53,8 +57,12 @@ class BookRecommendation(BaseModel):
 
 
 @app.post("/recommend", response_model=list[BookRecommendation])
-def recommend(profile: UserProfile, top_n: int = 20) -> list[BookRecommendation]:
-    recs = state["recommender"].recommend(profile, top_n=top_n)
+def recommend(
+    profile: UserProfile,
+    top_n: int = Query(default=20, ge=1, le=100),
+) -> list[BookRecommendation]:
+    candidate_count = top_n * 2
+    recs = state["recommender"].recommend(profile, top_n=candidate_count)
 
     # A DataFrame isn't directly JSON-safe: NaN (e.g. a book missing a
     # rating) isn't valid JSON and most clients will choke on it. Swap NaN
