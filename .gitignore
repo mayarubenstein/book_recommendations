@@ -1,2 +1,8 @@
 .DS_Store
 Books_rating.parquet
+all_books.json
+catalog_embeddings.npy
+catalog_embeddings.npy.progress
+catalog_embeddings.npz
+__pycache__/
+.env
