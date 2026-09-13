@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app/backend
 RUN git clone --depth 1 --branch "${FRONTEND_BRANCH}" "${FRONTEND_REPOSITORY}" /app/frontend \
-    && pip install --no-cache-dir -r /app/frontend/requirements.txt
+    && pip install --no-cache-dir -r /app/frontend/book-match/requirements.txt
 
 COPY start_space.sh /app/start_space.sh
 RUN chmod +x /app/start_space.sh

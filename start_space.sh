@@ -11,5 +11,5 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cd /app/frontend
+cd /app/frontend/book-match
 exec python -m streamlit run app.py --server.address 0.0.0.0 --server.port 7860 --server.headless true
