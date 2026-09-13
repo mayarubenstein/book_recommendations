@@ -63,8 +63,25 @@ CATALOG_COLUMNS = [
     "Average_Normalized_Rating",
 ]
 # Bumped from "metadata-and-reviews-v2": content_text now also folds in
-# reviewer age/location text, so old cached artifacts must be rebuilt.
+# reviewer age/location text. Legacy artifacts remain usable because reviewer
+# demographics are also scored separately by _demographic_similarity().
 EMBEDDING_TEXT_VERSION = "metadata-reviews-demographics-v3"
+LEGACY_EMBEDDING_TEXT_VERSIONS = {"metadata-and-reviews-v2"}
+RUNTIME_CATALOG_COLUMNS = [
+    "Book ID", "Title", "Authors", "Category/Genre", "Description",
+    "Review_Count", "Average_Normalized_Rating", "content_text",
+    "_clean_title_str", "_demographic_age_buckets", "_demographic_location_sets",
+    "_review_summaries",
+    "_is_english",
+]
+
+NON_ENGLISH_MARKERS = {
+    " polish": {" oraz ", " dla ", " jest ", " nie ", " książka ", " książki "},
+    "spanish": {" el ", " la ", " los ", " las ", " una ", " que ", " del "},
+    "french": {" le ", " les ", " des ", " une ", " est ", " dans "},
+    "german": {" der ", " die ", " das ", " und ", " ein ", " eine "},
+    "italian": {" il ", " gli ", " una ", " che ", " della "},
+}
 
 
 # Input: a review record (dict or JSON string). Output: it as a dict, or None if unusable.
@@ -120,6 +137,48 @@ def _location_keys(location: Any) -> set[str]:
         if value:
             parts.add(value)
     return parts
+
+
+def _is_probably_english(title: Any, description: Any) -> bool:
+    """Reject obvious non-English records when the source has no language field."""
+    text = f" {title or ''} {description or ''} ".casefold()
+    for character in text:
+        codepoint = ord(character)
+        if (
+            0x0590 <= codepoint <= 0x08FF  # Hebrew/Arabic
+            or 0x0370 <= codepoint <= 0x052F  # Greek/Cyrillic
+            or 0x1100 <= codepoint <= 0x11FF  # Hangul
+            or 0x3040 <= codepoint <= 0x30FF  # Japanese
+            or 0x3400 <= codepoint <= 0x9FFF  # Chinese
+        ):
+            return False
+    normalized = re.sub(r"[^\w]+", " ", text)
+    marker_hits = [
+        marker
+        for markers in NON_ENGLISH_MARKERS.values()
+        for marker in markers
+        if marker in normalized
+    ]
+    distinctive_markers = {" książ", " del ", " dans ", " und ", " della "}
+    if len(marker_hits) >= 2 or any(marker in normalized for marker in distinctive_markers):
+        return False
+    polish_letters = set("ąćęłńóśźż")
+    return not any(character in polish_letters for character in text)
+
+
+def _recommendation_key(title: Any, authors: Any) -> str:
+    """Normalize edition/series variants so one work is shown once."""
+    normalized_title = str(title or "").casefold().strip()
+    normalized_title = re.sub(r"\s*\([^)]*(?:#|series|book|volume|vol\.)[^)]*\)\s*$", "", normalized_title)
+    normalized_title = re.sub(r"[^a-z0-9]+", " ", normalized_title).strip()
+    normalized_authors = re.sub(r"[^a-z0-9]+", " ", str(authors or "").casefold()).strip()
+    return f"{normalized_title}|{normalized_authors}" if normalized_authors else normalized_title
+
+
+def _source_quality_prior(book_id: Any) -> float:
+    """Prefer Amazon and Book-Crossing equally over Goodreads."""
+    source = str(book_id or "").upper().split("_", 1)[0]
+    return {"AMZ": 1.0, "BX": 1.0, "GR": 0.35}.get(source, 0.5)
 
 
 # Input: a book's review list. Output: (age_buckets, locations) sets aggregated across all reviewers.
@@ -194,6 +253,36 @@ def _reviews_to_text(reviews: Any, max_reviews: int = 8, max_chars: int = 2400) 
     return " ".join(parts)[:max_chars]
 
 
+def _review_summaries(reviews: Any, max_reviews: int = 5, max_chars: int = 500) -> list[dict[str, Any]]:
+    """Keep short review excerpts and non-identifying demographics for display."""
+    if not isinstance(reviews, list):
+        return []
+
+    summaries: list[dict[str, Any]] = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        summary = str(review.get("summary") or "").strip()
+        text = str(review.get("text") or "").strip()
+        excerpt = (summary or text)[:max_chars]
+        if not excerpt:
+            continue
+        demographics = review.get("user_demographics")
+        if not isinstance(demographics, Mapping):
+            demographics = {}
+        reviewer: dict[str, Any] = {}
+        age = _valid_age(demographics.get("age"))
+        location = demographics.get("location")
+        if age is not None:
+            reviewer["age"] = age
+        if isinstance(location, str) and location.strip():
+            reviewer["location"] = location.strip()
+        summaries.append({"text": excerpt, "reviewer": reviewer})
+        if len(summaries) >= max_reviews:
+            break
+    return summaries
+
+
 def load_catalog(json_path: str | Path) -> pd.DataFrame:
     """Load all_books.json into a DataFrame and add a single text field per
     book that we'll embed. Missing text fields degrade gracefully."""
@@ -243,6 +332,11 @@ def load_catalog(json_path: str | Path) -> pd.DataFrame:
     )
     df["_demographic_location_sets"] = reviews.apply(_reviewer_location_sets)
     df["_demographic_text"] = reviews.apply(_reviewer_demographic_text)
+    df["_review_summaries"] = reviews.apply(_review_summaries)
+    df["_is_english"] = [
+        _is_probably_english(title, description)
+        for title, description in zip(df["Title"], df["Description"])
+    ]
     # Title is mentioned once, not repeated: repeating it would pull books
     # with superficially similar titles (shared words, unrelated meaning)
     # closer together in embedding space, which isn't a signal we want.
@@ -274,6 +368,56 @@ def catalog_fingerprint(json_path: str | Path) -> str:
         for chunk in iter(lambda: catalog_file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def save_runtime_catalog(
+    catalog: pd.DataFrame,
+    runtime_path: str | Path,
+    catalog_path: str | Path,
+) -> str:
+    """Save the preprocessed fields needed by the API without raw reviews."""
+    source = Path(catalog_path)
+    fingerprint = catalog_fingerprint(source)
+    payload = {
+        "catalog_fingerprint": fingerprint,
+        "source_size": source.stat().st_size,
+        "source_mtime_ns": source.stat().st_mtime_ns,
+        "catalog": catalog[RUNTIME_CATALOG_COLUMNS],
+    }
+    runtime = Path(runtime_path)
+    runtime.parent.mkdir(parents=True, exist_ok=True)
+    pd.to_pickle(payload, runtime)
+    return fingerprint
+
+
+def load_runtime_catalog(
+    runtime_path: str | Path,
+    catalog_path: str | Path,
+) -> tuple[pd.DataFrame, str]:
+    """Load the preprocessed API catalog and reject an obviously stale copy."""
+    runtime = Path(runtime_path)
+    source = Path(catalog_path)
+    if not runtime.exists():
+        raise FileNotFoundError(
+            f"Missing runtime catalog: {runtime}. Run build_catalog_embeddings.py."
+        )
+    payload = pd.read_pickle(runtime)
+    stat = source.stat()
+    if (
+        payload.get("source_size") != stat.st_size
+        or payload.get("source_mtime_ns") != stat.st_mtime_ns
+    ):
+        raise ValueError(
+            "Runtime catalog is stale because all_books.json changed. "
+            "Run build_catalog_embeddings.py again."
+        )
+    catalog = payload["catalog"]
+    missing = [column for column in RUNTIME_CATALOG_COLUMNS if column not in catalog.columns]
+    if missing:
+        raise ValueError(
+            "Runtime catalog is missing review fields. Run build_runtime_catalog.py again."
+        )
+    return catalog, payload["catalog_fingerprint"]
 
 
 # ---------------------------------------------------------------------------
@@ -590,6 +734,7 @@ class Recommender:
         self,
         artifact_path: str | Path,
         catalog_path: str | Path,
+        catalog_fingerprint_value: str | None = None,
     ) -> None:
         """Persist catalog vectors and the metadata needed to validate them."""
         if not isinstance(self._catalog_embeddings, np.ndarray):
@@ -597,7 +742,7 @@ class Recommender:
 
         book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy(dtype=str)
         metadata = {
-            "catalog_fingerprint": catalog_fingerprint(catalog_path),
+            "catalog_fingerprint": catalog_fingerprint_value or catalog_fingerprint(catalog_path),
             "embedding_model": getattr(self.embedder, "model_name", None),
             "embedding_text_version": EMBEDDING_TEXT_VERSION,
             "row_count": len(self.catalog),
@@ -614,6 +759,7 @@ class Recommender:
         self,
         artifact_path: str | Path,
         catalog_path: str | Path,
+        catalog_fingerprint_value: str | None = None,
     ) -> "Recommender":
         """Load vectors created by the offline indexing step after validation.
 
@@ -633,7 +779,8 @@ class Recommender:
             saved_book_ids = saved["book_ids"].astype(str)
 
         expected_model = getattr(self.embedder, "model_name", None)
-        if metadata.get("catalog_fingerprint") != catalog_fingerprint(catalog_path):
+        expected_fingerprint = catalog_fingerprint_value or catalog_fingerprint(catalog_path)
+        if metadata.get("catalog_fingerprint") != expected_fingerprint:
             raise ValueError(
                 "Catalog embedding artifact is stale because all_books.json changed. "
                 "Run `python build_catalog_embeddings.py` again."
@@ -643,8 +790,15 @@ class Recommender:
                 f"Artifact model {metadata.get('embedding_model')!r} does not match "
                 f"the configured model {expected_model!r}. Rebuild the artifact."
             )
-        if metadata.get("embedding_text_version") != EMBEDDING_TEXT_VERSION:
-            raise ValueError("Embedding text format changed. Rebuild the artifact.")
+        artifact_text_version = metadata.get("embedding_text_version")
+        if artifact_text_version != EMBEDDING_TEXT_VERSION:
+            if artifact_text_version not in LEGACY_EMBEDDING_TEXT_VERSIONS:
+                raise ValueError("Embedding text format changed. Rebuild the artifact.")
+            print(
+                "[artifact] loading legacy embedding text version "
+                f"{artifact_text_version}; rebuild to include reviewer demographics "
+                "in content embeddings."
+            )
 
         current_book_ids = self.catalog["Book ID"].fillna("").astype(str).to_numpy()
         if len(embeddings) != len(self.catalog) or not np.array_equal(saved_book_ids, current_book_ids):
@@ -744,23 +898,27 @@ class Recommender:
         pop = self._bayesian_rating()
         pop_norm = ((pop - pop.min()) / (pop.max() - pop.min() + 1e-9)).to_numpy()
         sim_demo = self._demographic_similarity(profile)
+        source_prior = self.catalog["Book ID"].map(_source_quality_prior).to_numpy()
 
         score = (
             w_pref * sim_pref
             + w_liked * sim_liked
             + w_demo * sim_demo
             + w_pop * pop_norm
+            + 0.08 * source_prior
         )
 
         result = self.catalog.copy()
         result["sim_preferences"] = sim_pref
         result["sim_liked_books"] = sim_liked
         result["sim_demographics"] = sim_demo
+        result["source_prior"] = source_prior
         result["score"] = score
 
         # Hard filters -- deterministic constraints, not signals to blend in,
         # so they're applied after scoring rather than as features.
         mask = pd.Series(True, index=result.index)
+        mask &= result["_is_english"]
 
         liked_lower = {b.title.strip().lower() for b in profile.layer1.liked_books if b.title}
         if liked_lower:
@@ -770,10 +928,15 @@ class Recommender:
             for kw in AVOID_KEYWORDS.get(tag, [tag.replace("_", " ")]):
                 mask &= ~result["content_text"].str.contains(re.escape(kw), na=False)
 
-        result = result[mask]
-        return result.sort_values("score", ascending=False).head(top_n)[
-            ["Book ID", "Title", "Authors", "Category/Genre", "Review_Count",
+        result = result[mask].sort_values("score", ascending=False)
+        result["_recommendation_key"] = [
+            _recommendation_key(title, authors)
+            for title, authors in zip(result["Title"], result["Authors"])
+        ]
+        result = result.drop_duplicates("_recommendation_key", keep="first")
+        return result.head(top_n)[
+            ["Book ID", "Title", "Authors", "Category/Genre", "Description", "Review_Count",
                "Average_Normalized_Rating", "sim_preferences", "sim_liked_books",
-               "sim_demographics", "score"]
+                    "sim_demographics", "score", "_review_summaries"]
         ]
 

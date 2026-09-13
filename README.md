@@ -48,6 +48,21 @@ version, and a fingerprint of the exact catalog file. FastAPI loads this artifac
 at startup and does not re-embed books for each request. If the catalog or model
 changes, rerun the indexing command.
 
+Artifacts created with the earlier `metadata-and-reviews-v2` text format remain
+loadable. The API prints a warning and uses its separate reviewer-demographic
+similarity signal; rerun indexing later if you want reviewer demographics folded
+into the main content embeddings as well.
+
+Run the runtime preprocessing command once to create `catalog_runtime.pkl`. This is a compact
+runtime catalog containing the fields needed for scoring and filtering, including
+precomputed reviewer-demographic fields. FastAPI loads this cache at startup and
+does not parse the multi-gigabyte `all_books.json` or rebuild demographic data on
+every restart. Regenerate it whenever `all_books.json` changes:
+
+```powershell
+python build_runtime_catalog.py
+```
+
 Do not run `content_recommender2.py` to start the application. It is the core
 library module and does not run an embedding job when imported. Use `api.py`
 through Uvicorn for the backend, or use `main.py` to send a profile to an
@@ -59,6 +74,35 @@ python main.py --profile sample_preference_profile1.json --count 5
 
 `all-mpnet-base-v2` (768 dimensions) may be evaluated later. Switching models
 requires changing the configured model and regenerating the artifact.
+
+## Recommendation verification
+
+The API first generates `2 * n` candidates for a request of `n` books. It sends
+those candidates, including catalog metadata and recommender scores, to the
+OpenAI verifier. The frontend receives only approved books, capped at `n`.
+If verification fails, the API returns an error instead of showing unverified
+recommendations.
+
+Each approved book also includes up to five short review excerpts and any
+available reviewer age/location details. These are precomputed into
+`catalog_runtime.pkl`; raw review lists are not sent to the frontend.
+
+The runtime catalog also marks obvious non-English records and the recommender
+filters them before ranking. The verifier applies a second English-language
+check. Regenerate the runtime catalog after this language-filter change.
+
+Source quality is also included as a small ranking prior: Amazon (`AMZ`) and
+Book-Crossing (`BX`) are treated equally because they provide stronger review
+or reviewer evidence, while Goodreads (`GR`) is a fallback source.
+
+Create a local `.env` file in this directory and add the key without quotes:
+
+```text
+OPENAI_API_KEY=your-openai-api-key
+```
+
+Never commit `.env` or expose the key to the frontend. The key is used only by
+the FastAPI backend.
 
 ## Run the backend
 
