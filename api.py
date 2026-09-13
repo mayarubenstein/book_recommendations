@@ -10,9 +10,11 @@ shape, POSTing that exact JSON to /recommend as the request body just works --
 FastAPI validates and parses it for you, no glue code needed.
 """
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 
 import numpy as np
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -26,9 +28,17 @@ from content_recommender2 import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-CATALOG_PATH = BASE_DIR / "all_books.json"
-ARTIFACT_PATH = BASE_DIR / "catalog_embeddings.npz"
-RUNTIME_CATALOG_PATH = BASE_DIR / "catalog_runtime.pkl"
+load_dotenv(BASE_DIR / ".env")
+
+
+def _configured_path(name: str, default_name: str) -> Path:
+    configured = Path(os.getenv(name, str(BASE_DIR / default_name)))
+    return configured if configured.is_absolute() else BASE_DIR / configured
+
+
+CATALOG_PATH = _configured_path("CATALOG_PATH", "all_books.json")
+ARTIFACT_PATH = _configured_path("EMBEDDING_ARTIFACT_PATH", "catalog_embeddings.npz")
+RUNTIME_CATALOG_PATH = _configured_path("RUNTIME_CATALOG_PATH", "catalog_runtime.pkl")
 
 # Populated once at startup, reused for every request. Re-embedding ~326k
 # books per request would make each call take minutes instead of

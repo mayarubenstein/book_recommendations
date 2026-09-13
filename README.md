@@ -1,3 +1,9 @@
+---
+title: Book Recommendation System
+sdk: docker
+app_port: 7860
+---
+
 # Book Recommendation System
 
 Local FastAPI backend for the book recommendation system. The Streamlit frontend
@@ -138,3 +144,31 @@ The frontend sends profiles to `http://127.0.0.1:8000` by default. Set
 ```powershell
 $env:BOOK_RECOMMENDER_API_URL = "http://127.0.0.1:8000"
 ```
+
+## Hugging Face Spaces deployment
+
+The repository includes a Docker Space setup. It runs Streamlit on port `7860`
+and FastAPI internally on port `8000`. The Docker image clones the frontend
+worktree from the `gettingUserInput` branch; update `FRONTEND_REPOSITORY` and
+`FRONTEND_BRANCH` in `Dockerfile` if that location changes.
+
+Create a private Hugging Face Dataset containing exactly these files:
+
+```text
+all_books.json
+catalog_embeddings.npz
+catalog_runtime.pkl
+```
+
+In the Space Settings, add these as Secrets:
+
+```text
+OPENAI_API_KEY
+HF_TOKEN
+HF_DATASET_ID=your-account/your-private-dataset
+```
+
+The Space downloads missing data files to `/data` at startup. The local
+workflow is unchanged; `.env` is used locally and is excluded from Docker.
+Create the Space with Docker SDK and port `7860`, then push this repository's
+code to the Space repository. Do not push the three data files or `.env`.

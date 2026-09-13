@@ -1,10 +1,10 @@
-.DS_Store
-Books_rating.parquet
+.env
+.git
+__pycache__/
+*.pyc
 all_books.json
 catalog_embeddings.npy
-catalog_embeddings.npy.progress
 catalog_embeddings.npz
 catalog_runtime.pkl
 space_data/
-__pycache__/
-.env
+book_recommendations_frontend/

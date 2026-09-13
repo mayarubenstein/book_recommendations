@@ -399,7 +399,7 @@ def load_runtime_catalog(
     source = Path(catalog_path)
     if not runtime.exists():
         raise FileNotFoundError(
-            f"Missing runtime catalog: {runtime}. Run build_catalog_embeddings.py."
+            f"Missing runtime catalog: {runtime}. Run build_runtime_catalog.py."
         )
     payload = pd.read_pickle(runtime)
     stat = source.stat()
