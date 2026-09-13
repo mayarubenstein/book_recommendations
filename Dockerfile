@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-ARG FRONTEND_REPOSITORY=https://github.com/mayarubenstein/book_recommendations_frontend.git
+ARG FRONTEND_REPOSITORY=https://github.com/mayarubenstein/book_recommendations.git
 ARG FRONTEND_BRANCH=gettingUserInput
 
 WORKDIR /app/backend
