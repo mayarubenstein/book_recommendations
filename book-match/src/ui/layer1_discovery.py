@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import streamlit as st
+from streamlit_searchbox import st_searchbox
 
-from src.data.book_provider import BookProvider
+from src.data.book_provider import BackendUnavailableError, BookProvider, BookRef, liked_book_key
 from src.data.mood_catalog import MOOD_CHIPS
 from src.i18n.strings import t, translate_genre
 from src.profile.schema import Layer1Profile
 from src.ui.state import STEP_LAYER2, STEP_SUMMARY, goto
+
+
+def _book_label(book: BookRef) -> str:
+    return f"{book.title} — {book.authors}" if book.authors else book.title
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_search(_provider: BookProvider, query: str) -> list[BookRef]:
+    # Leading underscore on _provider excludes it from st.cache_data's hash key
+    # (providers aren't hashable/stable-to-hash) -- only `query` keys the cache,
+    # so retyping an identical partial string within 30s skips the network call.
+    return _provider.search_books(query, limit=10)
 
 
 def render(provider: BookProvider) -> None:
@@ -52,46 +65,73 @@ def render(provider: BookProvider) -> None:
 
     # --- Section 3: Books I like ---
     # The real catalog can run to millions of books, so it can never be sent
-    # to the browser client-side - search is server-side via the provider and
-    # capped to a handful of matches. Results and the running selection are
-    # both plain visible chips (like the mood/genre sections above), nothing
-    # hidden behind a dropdown the user has to know to open.
+    # to the browser client-side - search is a live, per-keystroke (debounced)
+    # HTTP call to the backend via the provider. Free text is always kept as
+    # a fallback ("Add as typed") since a typo-tolerant match still isn't
+    # guaranteed to find the right (or any) catalog entry.
     st.subheader(t("layer1.section.books"))
-    query = st.text_input(t("layer1.search.input_label"), placeholder=t("layer1.search.placeholder"))
-    st.caption(t("layer1.search.limit_note"))
-    raw_matches = provider.search_books(query, limit=10) if query.strip() else provider.get_popular_books(limit=10)
-    matches = [b for b in raw_matches if b.book_id not in draft["l1_liked_books"]]  # already-added stay in the row below only
+    st.session_state.setdefault("_l1_search_query", "")
+    st.session_state.setdefault("_l1_search_backend_down", False)
+    st.session_state.setdefault("_l1_search_no_matches", False)
 
-    if query.strip() and not raw_matches:
+    def _add_book(book: BookRef) -> None:
+        draft["l1_liked_books"][liked_book_key(book)] = book
+
+    def _search_options(query: str) -> list[tuple[str, BookRef]]:
+        query = query.strip()
+        st.session_state["_l1_search_query"] = query
+        if not query:
+            st.session_state["_l1_search_backend_down"] = False
+            st.session_state["_l1_search_no_matches"] = False
+            return []
+        try:
+            results = _cached_search(provider, query)
+        except BackendUnavailableError:
+            st.session_state["_l1_search_backend_down"] = True
+            st.session_state["_l1_search_no_matches"] = False
+            return []
+        st.session_state["_l1_search_backend_down"] = False
+        st.session_state["_l1_search_no_matches"] = not results
+        return [(_book_label(book), book) for book in results]
+
+    st_searchbox(
+        _search_options,
+        key="l1_book_search",
+        placeholder=t("layer1.search.placeholder"),
+        label=t("layer1.search.input_label"),
+        clear_on_submit=True,
+        submit_function=_add_book,
+    )
+    st.caption(t("layer1.search.limit_note"))
+
+    if st.session_state["_l1_search_backend_down"]:
+        st.caption(t("layer1.search.backend_unavailable"))
+    elif st.session_state["_l1_search_no_matches"]:
         st.caption(t("layer1.search.no_matches"))
-    elif matches:
-        book_by_label = {f"{b.title} — {b.authors}": b for b in matches}
-        add_labels = (
-            st.pills(
-                t("layer1.search.add_label"),
-                options=list(book_by_label.keys()),
-                selection_mode="multi",
-                default=[],
-            )
-            or []
-        )
-        for label in add_labels:
-            book = book_by_label[label]
-            draft["l1_liked_books"][book.book_id] = book
+
+    current_query = st.session_state["_l1_search_query"]
+    if current_query and st.button(
+        t("layer1.search.add_as_typed").format(query=current_query),
+        key="l1_add_as_typed",
+        use_container_width=True,
+    ):
+        _add_book(BookRef(book_id=None, title=current_query, authors=""))
+        st.session_state["_l1_search_query"] = ""
+        st.rerun()
 
     if draft["l1_liked_books"]:
-        selected_label_by_id = {book_id: f"{b.title} — {b.authors}" for book_id, b in draft["l1_liked_books"].items()}
+        label_by_key = {key: _book_label(b) for key, b in draft["l1_liked_books"].items()}
         kept_labels = (
             st.pills(
                 t("layer1.search.selected_label"),
-                options=list(selected_label_by_id.values()),
+                options=list(label_by_key.values()),
                 selection_mode="multi",
-                default=list(selected_label_by_id.values()),
+                default=list(label_by_key.values()),
             )
             or []
         )
         draft["l1_liked_books"] = {
-            book_id: b for book_id, b in draft["l1_liked_books"].items() if selected_label_by_id[book_id] in kept_labels
+            key: b for key, b in draft["l1_liked_books"].items() if label_by_key[key] in kept_labels
         }
 
     liked_books = list(draft["l1_liked_books"].values())

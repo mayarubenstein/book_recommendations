@@ -22,7 +22,7 @@ DEFAULT_NUM_RECOMMENDATIONS = 5
 # with `value=`/`default=` from here and writes the widget's return value
 # back immediately, so answers survive navigating away and back.
 _DEFAULT_DRAFT = {
-    "l1_liked_books": {},  # book_id -> BookRef
+    "l1_liked_books": {},  # liked_book_key(BookRef) -> BookRef
     "l1_genres": [],
     "l1_moods": [],
     "l2_plot_character": 50,

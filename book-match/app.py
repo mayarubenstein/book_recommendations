@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
+
 import streamlit as st
 
-from src.data.mock_provider import MockBookProvider
+from src.data.catalog_provider import CatalogBookProvider
 from src.data.profile_store import InMemoryProfileStore
 from src.i18n.rtl import inject_direction_css
 from src.i18n.strings import t
@@ -16,8 +18,10 @@ init_state()
 inject_direction_css()
 
 # Swap these two lines to plug in the real dataset / a persistent store later -
-# no other file needs to change.
-book_provider = MockBookProvider()
+# no other file needs to change. CatalogBookProvider itself never makes a
+# network call at construction time (only search_books() does), so a
+# not-yet-running backend can't crash startup here.
+book_provider = CatalogBookProvider(base_url=os.environ.get("BOOK_API_BASE_URL", "http://127.0.0.1:8000"))
 if "profile_store" not in st.session_state:
     st.session_state.profile_store = InMemoryProfileStore()
 profile_store = st.session_state.profile_store
