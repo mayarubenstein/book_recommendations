@@ -89,7 +89,7 @@ def recommend(
     profile: UserProfile,
     top_n: int = Query(default=20, ge=1, le=100),
 ) -> list[BookRecommendation]:
-    candidate_count = top_n * 2
+    candidate_count = top_n * 3
     recs = state["recommender"].recommend(profile, top_n=candidate_count)
 
     # A DataFrame isn't directly JSON-safe: NaN (e.g. a book missing a
