@@ -50,6 +50,8 @@ import ijson
 from pydantic import BaseModel, Field, model_validator
 from sklearn.metrics.pairwise import cosine_similarity
 
+from search import build_search_corpus, search_books
+
 CATALOG_COLUMNS = [
     "Title",
     "Clean_Title",
@@ -70,8 +72,8 @@ LEGACY_EMBEDDING_TEXT_VERSIONS = {"metadata-and-reviews-v2"}
 RUNTIME_CATALOG_COLUMNS = [
     "Book ID", "Title", "Authors", "Category/Genre", "Description",
     "Review_Count", "Average_Normalized_Rating", "content_text",
-    "_clean_title_str", "_demographic_age_buckets", "_demographic_location_sets",
-    "_review_summaries",
+    "_clean_title_str", "_authors_str", "_demographic_age_buckets",
+    "_demographic_location_sets", "_review_summaries",
     "_is_english",
 ]
 
@@ -658,6 +660,14 @@ class Recommender:
     catalog: pd.DataFrame
     embedder: Embedder
     _catalog_embeddings: Any = field(default=None, repr=False)
+    search_corpus: pd.DataFrame | None = field(default=None, repr=False)
+
+    # Input: none. Output: the fuzzy-search corpus, building it from self.catalog
+    # on first use if the caller (e.g. api.py's lifespan) hasn't already.
+    def ensure_search_corpus(self) -> pd.DataFrame:
+        if self.search_corpus is None:
+            self.search_corpus = build_search_corpus(self.catalog)
+        return self.search_corpus
 
     # Input: an optional cache path. Output: self, with every catalog book embedded.
     def fit(self, cache_path: str | Path | None = None) -> "Recommender":
@@ -854,21 +864,68 @@ class Recommender:
             similarities.append(float(np.mean(component_scores)) if component_scores else 0.5)
         return np.asarray(similarities)
 
-    # Input: a UserProfile. Output: matched liked-book embeddings (or None) and any titles not found.
-    def _resolve_liked_books(self, profile: UserProfile) -> tuple[Any, list[str]]:
-        wanted = {b.title.strip().lower() for b in profile.layer1.liked_books if b.title}
-        if not wanted:
-            return None, []
+    # Input: a UserProfile. Output: matched liked-book embeddings (or None),
+    # the set of matched catalog Book IDs (so callers can hard-filter them
+    # out of recommendations regardless of *how* each was resolved), and any
+    # titles not found by book_id, exact title, or fuzzy title match.
+    def _resolve_liked_books(self, profile: UserProfile) -> tuple[Any, set[str], list[str]]:
+        liked = [b for b in profile.layer1.liked_books if b.book_id or b.title]
+        if not liked:
+            return None, set(), []
 
-        mask = self.catalog["_clean_title_str"].isin(wanted)
-        matched_positions = np.flatnonzero(mask.to_numpy())
-        found_titles = set(self.catalog.loc[mask, "_clean_title_str"])
-        not_found = sorted(wanted - found_titles)
+        book_id_col = self.catalog["Book ID"].fillna("").astype(str)
+        matched_positions: list[int] = []
+        matched_book_ids: set[str] = set()
+        seen_positions: set[int] = set()
 
-        if len(matched_positions) == 0:
-            return None, sorted(wanted)
+        def _claim(position: int) -> None:
+            if position not in seen_positions:
+                seen_positions.add(position)
+                matched_positions.append(position)
+                matched_book_ids.add(str(book_id_col.iat[position]))
 
-        return self._catalog_embeddings[matched_positions], not_found
+        # 1. book_id-first: trust a caller-confirmed match over any text.
+        remaining: list[LikedBook] = []
+        for liked_book in liked:
+            if liked_book.book_id:
+                positions = np.flatnonzero((book_id_col == liked_book.book_id).to_numpy())
+                if len(positions):
+                    _claim(int(positions[0]))
+                    continue
+            remaining.append(liked_book)
+
+        # 2. exact title match against the normalized _clean_title_str column.
+        wanted_titles = {b.title.strip().lower() for b in remaining if b.title}
+        mask = self.catalog["_clean_title_str"].isin(wanted_titles) if wanted_titles else None
+        if mask is not None:
+            for position in np.flatnonzero(mask.to_numpy()):
+                _claim(int(position))
+            unmatched_titles = wanted_titles - set(self.catalog.loc[mask, "_clean_title_str"])
+        else:
+            unmatched_titles = set()
+
+        # 3. fuzzy fallback for titles that survived both exact passes above --
+        # a higher cutoff than the live search endpoint since this runs on
+        # already-frontend-resolved input, not open-ended search.
+        not_found: list[str] = []
+        corpus = self.ensure_search_corpus()
+        for title in sorted(unmatched_titles):
+            hits = search_books(corpus, title, limit=1, score_cutoff=80.0)
+            if hits:
+                positions = np.flatnonzero((book_id_col == hits[0].book_id).to_numpy())
+                if len(positions):
+                    _claim(int(positions[0]))
+                    continue
+            not_found.append(title)
+
+        if not matched_positions:
+            return None, matched_book_ids, sorted(not_found)
+
+        return (
+            self._catalog_embeddings[np.array(matched_positions, dtype=int)],
+            matched_book_ids,
+            sorted(not_found),
+        )
 
     # Input: a UserProfile and scoring options (weights, top_n, liked_agg). Output: the top_n ranked books.
     def recommend(
@@ -889,7 +946,7 @@ class Recommender:
         pref_vec = self.embedder.encode([profile.to_query_text()])
         sim_pref = cosine_similarity(pref_vec, self._catalog_embeddings).ravel()
 
-        liked_embeddings, not_found = self._resolve_liked_books(profile)
+        liked_embeddings, matched_liked_ids, not_found = self._resolve_liked_books(profile)
         if not_found:
             print(f"[recommend] liked books not found in catalog, skipped: {not_found}")
 
@@ -926,9 +983,8 @@ class Recommender:
         mask = pd.Series(True, index=result.index)
         mask &= result["_is_english"]
 
-        liked_lower = {b.title.strip().lower() for b in profile.layer1.liked_books if b.title}
-        if liked_lower:
-            mask &= ~result["_clean_title_str"].isin(liked_lower)
+        if matched_liked_ids:
+            mask &= ~result["Book ID"].fillna("").astype(str).isin(matched_liked_ids)
 
         for tag in profile.layer2.avoid_list:
             for kw in AVOID_KEYWORDS.get(tag, [tag.replace("_", " ")]):

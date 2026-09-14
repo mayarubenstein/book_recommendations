@@ -9,3 +9,4 @@ ijson>=3.3
 python-dotenv>=1.0
 openai>=1.40,<2
 huggingface-hub>=0.25
+rapidfuzz>=3.9

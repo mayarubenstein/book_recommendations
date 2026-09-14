@@ -26,6 +26,7 @@ from content_recommender2 import (
     load_catalog,
     load_runtime_catalog,
 )
+from search import search_books
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -58,6 +59,9 @@ async def lifespan(app: FastAPI):
     state["recommender"] = Recommender(catalog, embedder).load_embedding_artifact(
         ARTIFACT_PATH, CATALOG_PATH, fingerprint
     )
+    # Built once at startup (not lazily on first search) so the first user
+    # request isn't the one that pays for scanning the ~326k-row catalog.
+    state["recommender"].ensure_search_corpus()
     yield
     state.clear()
 
@@ -160,6 +164,31 @@ def recommend(
             review_summaries=row["review_summaries"],
         )
         for row, evaluation in approved
+    ]
+
+
+class BookSearchResult(BaseModel):
+    book_id: str
+    title: str
+    authors: str
+    score: float
+
+
+@app.get("/books/search", response_model=list[BookSearchResult])
+def search(
+    q: str = Query(default=""),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> list[BookSearchResult]:
+    corpus = state["recommender"].ensure_search_corpus()
+    matches = search_books(corpus, q, limit=limit)
+    return [
+        BookSearchResult(
+            book_id=match.book_id,
+            title=match.title,
+            authors=match.authors,
+            score=match.score,
+        )
+        for match in matches
     ]
 
 
