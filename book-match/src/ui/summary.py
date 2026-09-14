@@ -123,7 +123,7 @@ def render(profile_store: ProfileStore) -> None:
     if st.button("Get recommendations", type="primary", use_container_width=True):
         status = st.status("Finding your recommendations...", expanded=True)
         status.write(
-            f"Comparing your profile with {profile.num_recommendations * 2} candidate books."
+            f"Comparing your profile with {profile.num_recommendations * 3} candidate books."
         )
         status.write("A final review is checking those candidates against your preferences.")
         st.session_state.recommendations = []
