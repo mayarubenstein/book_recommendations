@@ -1,4 +1,4 @@
 streamlit>=1.40
 geonamescache>=2.0
-requests>=2.31
+requests>=2.32
 streamlit-searchbox>=0.1.13

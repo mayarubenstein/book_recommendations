@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+
+import requests
 import streamlit as st
 
 from src.data.profile_store import ProfileStore
@@ -12,6 +15,7 @@ _TEAL = "#2E6F6E"
 _CHIP_BG = "#EEF3F0"
 _BORDER = "#D7E1DC"
 _TEXT = "#1B211E"
+_API_URL = os.getenv("BOOK_RECOMMENDER_API_URL", "http://127.0.0.1:8000").rstrip("/")
 
 # (dataclass field name, low-end label key, high-end label key) - drives the
 # 0-100 slider values into a plain-language phrase instead of a raw number.
@@ -116,7 +120,65 @@ def render(profile_store: ProfileStore) -> None:
         st.markdown(f"**{t('summary.section.about_you')}**")
         st.markdown("\n".join(lines))
 
-    st.info(t("summary.not_available_yet"))
+    if st.button("Get recommendations", type="primary", use_container_width=True):
+        status = st.status("Finding your recommendations...", expanded=True)
+        status.write(
+            f"Comparing your profile with {profile.num_recommendations * 3} candidate books."
+        )
+        status.write("A final review is checking those candidates against your preferences.")
+        st.session_state.recommendations = []
+        try:
+            response = requests.post(
+                f"{_API_URL}/recommend",
+                params={"top_n": profile.num_recommendations},
+                json=profile.to_dict(),
+                timeout=150,
+            )
+            response.raise_for_status()
+            recommendations = response.json()
+            st.session_state.recommendations = recommendations
+            status.update(
+                label=f"Done - {len(recommendations)} approved recommendation(s) found.",
+                state="complete",
+                expanded=False,
+            )
+        except requests.RequestException as exc:
+            status.update(label="Recommendation request failed.", state="error")
+            st.error(f"Could not reach the recommendation API at {_API_URL}: {exc}")
+        except ValueError:
+            status.update(label="Recommendation response was invalid.", state="error")
+            st.error("The recommendation API returned an invalid response.")
+
+    recommendations = st.session_state.get("recommendations", [])
+    if recommendations:
+        st.subheader("Recommendations")
+        st.caption(f"{len(recommendations)} approved recommendation(s) returned")
+        st.dataframe(recommendations, use_container_width=True, hide_index=True)
+        with st.expander("Verification details"):
+            for recommendation in recommendations:
+                st.markdown(f"**{recommendation.get('title', 'Untitled')}**")
+                st.write(recommendation.get("hard_constraint_check", ""))
+                st.write(recommendation.get("soft_constraint_check", ""))
+        with st.expander("Book reviews"):
+            for recommendation in recommendations:
+                st.markdown(
+                    f"**{recommendation.get('title', 'Untitled')}** "
+                    f"by {recommendation.get('authors') or 'Unknown author'}"
+                )
+                reviews = recommendation.get("review_summaries", [])
+                if not reviews:
+                    st.caption("No review excerpts or reviewer details are available.")
+                    continue
+                for review in reviews:
+                    st.write(review.get("text", ""))
+                    reviewer = review.get("reviewer", {})
+                    details = [
+                        f"age {reviewer['age']}" if reviewer.get("age") is not None else "",
+                        reviewer.get("location", ""),
+                    ]
+                    details = [detail for detail in details if detail]
+                    if details:
+                        st.caption("Reviewer: " + ", ".join(details))
 
     with st.expander(t("summary.raw_json")):
         st.json(profile.to_dict())
