@@ -403,13 +403,19 @@ def load_runtime_catalog(
         )
     payload = pd.read_pickle(runtime)
     stat = source.stat()
-    if (
-        payload.get("source_size") != stat.st_size
-        or payload.get("source_mtime_ns") != stat.st_mtime_ns
-    ):
+    expected_fingerprint = payload.get("catalog_fingerprint")
+    actual_fingerprint = catalog_fingerprint(source)
+    if expected_fingerprint:
+        is_stale = expected_fingerprint != actual_fingerprint
+    else:
+        is_stale = (
+            payload.get("source_size") != stat.st_size
+            or payload.get("source_mtime_ns") != stat.st_mtime_ns
+        )
+    if is_stale:
         raise ValueError(
             "Runtime catalog is stale because all_books.json changed. "
-            "Run build_catalog_embeddings.py again."
+            "Run build_runtime_catalog.py again."
         )
     catalog = payload["catalog"]
     missing = [column for column in RUNTIME_CATALOG_COLUMNS if column not in catalog.columns]
