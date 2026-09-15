@@ -20,6 +20,7 @@ COPY start_space.sh /app/start_space.sh
 RUN chmod +x /app/start_space.sh
 
 ENV CATALOG_PATH=/data/all_books.json \
+    BOOK_TITLES_PATH=/data/book_titles.json \
     EMBEDDING_ARTIFACT_PATH=/data/catalog_embeddings.npz \
     RUNTIME_CATALOG_PATH=/data/catalog_runtime.pkl \
     SPACE_DATA_DIR=/data \

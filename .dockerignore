@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 all_books.json
+book_titles.json
 catalog_embeddings.npy
 catalog_embeddings.npz
 catalog_runtime.pkl

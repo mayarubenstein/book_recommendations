@@ -1,6 +1,7 @@
 .DS_Store
 Books_rating.parquet
 all_books.json
+book_titles.json
 catalog_embeddings.npy
 catalog_embeddings.npy.progress
 catalog_embeddings.npz

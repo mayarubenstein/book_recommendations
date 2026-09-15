@@ -15,7 +15,12 @@ def main() -> None:
     from huggingface_hub import hf_hub_download
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("all_books.json", "catalog_embeddings.npz", "catalog_runtime.pkl"):
+    for filename in (
+        "all_books.json",
+        "book_titles.json",
+        "catalog_embeddings.npz",
+        "catalog_runtime.pkl",
+    ):
         target = data_dir / filename
         if target.exists():
             print(f"Using existing {target}")

@@ -156,6 +156,7 @@ Create a private Hugging Face Dataset containing exactly these files:
 
 ```text
 all_books.json
+book_titles.json
 catalog_embeddings.npz
 catalog_runtime.pkl
 ```
@@ -168,7 +169,9 @@ HF_TOKEN
 HF_DATASET_ID=your-account/your-private-dataset
 ```
 
-The Space downloads missing data files to `/data` at startup. The local
-workflow is unchanged; `.env` is used locally and is excluded from Docker.
+The Space downloads missing data files to `/data` at startup, including
+`book_titles.json`. Locally, the same file remains in the repository root;
+in the Space its path is `/data/book_titles.json`. The local workflow is
+unchanged; `.env` is used locally and is excluded from Docker.
 Create the Space with Docker SDK and port `7860`, then push this repository's
-code to the Space repository. Do not push the three data files or `.env`.
+code to the Space repository. Do not push the four data files or `.env`.
