@@ -14,10 +14,20 @@ def _runtime_catalog_needs_refresh(path: Path) -> bool:
         payload = pd.read_pickle(path)
         catalog = payload.get("catalog")
         required = {
-            "_review_summaries",
-            "_is_english",
+            "Book ID",
+            "Title",
+            "Authors",
+            "Category/Genre",
+            "Description",
+            "Review_Count",
+            "Average_Normalized_Rating",
+            "content_text",
+            "_clean_title_str",
+            "_authors_str",
             "_demographic_age_buckets",
             "_demographic_location_sets",
+            "_review_summaries",
+            "_is_english",
         }
         return not required.issubset(catalog.columns)
     except Exception as exc:
@@ -42,8 +52,9 @@ def main() -> None:
         "catalog_runtime.pkl",
     ):
         target = data_dir / filename
-        needs_refresh = filename == "catalog_runtime.pkl" and _runtime_catalog_needs_refresh(target)
-        if target.exists() and not needs_refresh:
+        is_runtime_catalog = filename == "catalog_runtime.pkl"
+        needs_refresh = is_runtime_catalog and _runtime_catalog_needs_refresh(target)
+        if target.exists() and not is_runtime_catalog:
             print(f"Using existing {target}")
             continue
         if needs_refresh:

@@ -423,7 +423,8 @@ def load_runtime_catalog(
     missing = [column for column in RUNTIME_CATALOG_COLUMNS if column not in catalog.columns]
     if missing:
         raise ValueError(
-            "Runtime catalog is missing review fields. Run build_runtime_catalog.py again."
+            "Runtime catalog is missing columns: "
+            f"{', '.join(missing)}. Upload a freshly regenerated catalog_runtime.pkl."
         )
     return catalog, payload["catalog_fingerprint"]
 
