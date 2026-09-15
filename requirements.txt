@@ -3,6 +3,7 @@ uvicorn[standard]>=0.30
 pydantic>=2.8
 numpy>=1.26
 pandas>=2.2
+pyarrow>=15.0
 scikit-learn>=1.5
 sentence-transformers>=3.0
 ijson>=3.3
